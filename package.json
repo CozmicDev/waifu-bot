@@ -1,0 +1,24 @@
+{
+  "name": "waifu-bot",
+  "version": "1.0.0",
+  "description": "A Discord bot that rolls random anime characters with a point system based on favorites",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "setup-db": "node src/database/setup.js"
+  },
+  "keywords": ["discord", "bot", "anime", "characters", "jikan"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "axios": "^1.6.5",
+    "redis": "^4.6.12",
+    "pg": "^8.11.3",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
