@@ -26,6 +26,14 @@ class WaifuBot {
         // Snipe cooldowns - stores user ID -> timestamp
         this.snipeCooldowns = new Map();
 
+        // Double Points Event System
+        this.doublePointsActive = false;
+        this.doublePointsTimeout = null;
+        this.doublePointsAnnounceTimeout = null;
+        this.doublePointsEventChannel = null; // Store channel for end announcement
+        this.adminUserId = '115724975398322176';
+        this.announcementChannelId = '1407665345409454090';
+
         this.startupTime = new Date().toISOString();
         console.log(`🚀 Bot started at: ${this.startupTime}`);
 
@@ -73,6 +81,12 @@ class WaifuBot {
 
         this.client.on('messageCreate', async (message) => {
             if (message.author.bot) return;
+            
+            // Debug logging for double points commands
+            if (message.content.startsWith('!doublepoints')) {
+                console.log(`Double points command received: "${message.content}" from user ${message.author.id} (${message.author.username})`);
+                console.log(`Admin user ID: ${this.adminUserId}`);
+            }
 
             if (message.content.startsWith('!roll')) {
                 await this.handleRollCommand(message);
@@ -105,6 +119,10 @@ class WaifuBot {
                 const userId = await this.getUserId(message.author.id, message.author.username);
                 const characters = await this.getUserCharacters(userId);
                 await message.reply(`You have ${characters.length} characters.`);
+            } else if (message.content.startsWith('!doublepoints_ON')) {
+                await this.handleDoublePointsOn(message);
+            } else if (message.content.startsWith('!doublepoints_OFF')) {
+                await this.handleDoublePointsOff(message);
             }
         });
 
@@ -190,7 +208,7 @@ class WaifuBot {
                         { name: '🎭 Character', value: reservation.character.name, inline: true },
                         { name: '📺 Anime', value: reservation.animeInfo.title, inline: true },
                         { name: '❤️ Favorites', value: reservation.character.favorites?.toString() || '0', inline: true },
-                        { name: '🏆 Points Earned', value: `${points}`, inline: true },
+                        { name: '🏆 Points Earned', value: `${points}${this.doublePointsActive ? ' 🎆✨ x2!! 🔥' : ''}`, inline: true },
                         { name: '🎁 Special Gift', value: 'This character was reserved for you by an admin!', inline: false }
                     ])
                     .setImage(reservation.character.images?.jpg?.image_url)
@@ -289,7 +307,7 @@ class WaifuBot {
                     .setThumbnail(character.images?.jpg?.image_url || character.image_url)
                     .addFields(
                         { name: '❤️ Favorites', value: (character.favorites || 0).toString(), inline: true },
-                        { name: '🏆 Points Earned', value: duplicatePoints.toString(), inline: true },
+                        { name: '🏆 Points Earned', value: `${duplicatePoints}${this.doublePointsActive ? ' 🎆✨ x2!! 🔥' : ''}`, inline: true },
                         { name: '👤 Already Owned By', value: `User ID: ${globalOwnership.user_id}`, inline: true }
                     )
                     .setDescription('❌ **Character Already Claimed!**\nThis character is already owned by another user. You received 150 points instead.')
@@ -1572,7 +1590,7 @@ class WaifuBot {
                 .setThumbnail(character.images?.jpg?.image_url || character.image_url)
                 .addFields([
                     { name: '❤️ Favorites', value: (character.favorites || 0).toString(), inline: true },
-                    { name: '🏆 Points Earned', value: points.toString(), inline: true },
+                    { name: '🏆 Points Earned', value: `${points}${this.doublePointsActive ? ' 🎆✨ x2!! 🔥' : ''}`, inline: true },
                     { name: '✨ Status', value: isDuplicate ? 'Duplicate (+150 pts)' : 'New Character!', inline: true }
                 ])
                 .setFooter({ text: `Opened by ${interaction.user.username}` })
@@ -1908,6 +1926,11 @@ class WaifuBot {
             totalPoints = 500;
         }
 
+        // Apply double points event multiplier
+        if (this.doublePointsActive) {
+            totalPoints *= 2;
+        }
+
         return totalPoints;
     }
 
@@ -1918,7 +1941,7 @@ class WaifuBot {
             .setThumbnail(character.images?.jpg?.image_url || character.image_url)
             .addFields(
                 { name: '❤️ Favorites', value: (character.favorites || 0).toString(), inline: true },
-                { name: '🏆 Points Earned', value: points.toString(), inline: true }
+                { name: '🏆 Points Earned', value: `${points}${this.doublePointsActive ? ' 🎆✨ x2!! 🔥' : ''}`, inline: true }
             );
 
         // Add lucky roll progress if available
@@ -2038,9 +2061,15 @@ class WaifuBot {
             }
         }
 
+        // Calculate snipe cost with potential double points event discount
+        let snipeCost = (character.favorites || 0) * 3;
+        if (this.doublePointsActive) {
+            snipeCost = Math.ceil(snipeCost / 2);
+        }
+
         embed.addFields(
             { name: '⏰ Claim Timer', value: 'You have **30 seconds** to claim this character!', inline: false },
-            { name: '🥷 Snipe Cost', value: `${(character.favorites || 0) * 3} points`, inline: true }
+            { name: '🥷 Snipe Cost', value: `${snipeCost} points${this.doublePointsActive ? ' (50% off!)' : ''}`, inline: true }
         );
 
         if (character.about) {
@@ -2358,7 +2387,7 @@ class WaifuBot {
                     .setThumbnail(claimData.character.images?.jpg?.image_url || claimData.character.image_url)
                     .addFields(
                         { name: '❤️ Favorites', value: (claimData.character.favorites || 0).toString(), inline: true },
-                        { name: '🏆 Points Earned', value: duplicatePoints.toString(), inline: true }
+                        { name: '🏆 Points Earned', value: `${duplicatePoints}${this.doublePointsActive ? ' 🎆✨ x2!! 🔥' : ''}`, inline: true }
                     )
                     .setDescription('❌ **Character Already Claimed!**\nSomeone else claimed this character first. You received 150 points instead.')
                     .setFooter({ 
@@ -2476,7 +2505,12 @@ class WaifuBot {
             const userPoints = user ? user.total_points : 0;
 
             // Calculate snipe cost (3x character favorites)
-            const snipeCost = (claimData.character.favorites || 0) * 3;
+            let snipeCost = (claimData.character.favorites || 0) * 3;
+            
+            // Apply half cost during double points events
+            if (this.doublePointsActive) {
+                snipeCost = Math.ceil(snipeCost / 2);
+            }
 
             // Check if user has enough points
             if (userPoints < snipeCost) {
@@ -2828,7 +2862,7 @@ class WaifuBot {
 
             finalEmbed.addFields([
                 { name: '🎲 Characters Obtained', value: characterList || 'No characters rolled', inline: false },
-                { name: '🏆 Total Points Earned', value: `${totalPoints}`, inline: true },
+                { name: '🏆 Total Points Earned', value: `${totalPoints}${this.doublePointsActive ? ' 🎆✨ x2!! 🔥' : ''}`, inline: true },
                 { name: '⭐ Duplicates', value: `${duplicateCount}`, inline: true },
                 { name: '🎁 Bonus Characters', value: `${bonusCount}`, inline: true },
                 { name: '  Pack Value', value: `${totalPoints} pts (cost: 1000)`, inline: false }
@@ -3744,6 +3778,124 @@ class WaifuBot {
 
     async start() {
         await this.client.login(process.env.DISCORD_TOKEN);
+    }
+
+    async handleDoublePointsOn(message) {
+        try {
+            console.log(`handleDoublePointsOn called by user ${message.author.id} (${message.author.username})`);
+            
+            // Check if user is admin
+            if (message.author.id !== this.adminUserId) {
+                console.log(`Permission denied. User ID: ${message.author.id}, Admin ID: ${this.adminUserId}`);
+                await message.reply('❌ You do not have permission to use this command!');
+                return;
+            }
+
+            // Check if event is already active
+            if (this.doublePointsActive) {
+                console.log('Double points event already active');
+                await message.reply('⚠️ Double Points Event is already active!');
+                return;
+            }
+
+            console.log('Starting double points event...');
+            
+            // Send announcement in the same channel where command was sent
+            const announcementEmbed = new EmbedBuilder()
+                .setTitle('🎉 DOUBLE POINTS EVENT ACTIVATED! 🎉')
+                .setDescription('# 🔥 DOUBLE POINTS EVENT IS NOW ACTIVE FOR 20 MINUTES! 🔥')
+                .setColor('#FFD700')
+                .addFields(
+                    { name: '📈 Double Points', value: 'All character rolls give 2x points!', inline: true },
+                    { name: '💰 Half Snipe Cost', value: 'Sniping costs 50% less!', inline: true },
+                    { name: '⏰ Duration', value: '20 minutes', inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: 'Event is now active!' });
+
+            await message.channel.send({ embeds: [announcementEmbed] });
+            await message.reply('✅ Double Points Event is now active!');
+
+            // Start event immediately
+            await this.startDoublePointsEvent(message.channel);
+            
+            console.log('Double points event started successfully');
+
+        } catch (error) {
+            console.error('Error in handleDoublePointsOn:', error);
+            await message.reply('❌ Failed to start Double Points Event!');
+        }
+    }
+
+    async handleDoublePointsOff(message) {
+        // Check if user is admin
+        if (message.author.id !== this.adminUserId) {
+            await message.reply('❌ You do not have permission to use this command!');
+            return;
+        }
+
+        if (!this.doublePointsActive && !this.doublePointsAnnounceTimeout) {
+            await message.reply('⚠️ No Double Points Event is currently active or scheduled!');
+            return;
+        }
+
+        await this.stopDoublePointsEvent();
+        await message.reply('✅ Double Points Event has been manually stopped!');
+    }
+
+    async startDoublePointsEvent(channel = null) {
+        try {
+            this.doublePointsActive = true;
+            this.doublePointsEventChannel = channel; // Store the channel for end announcement
+            console.log('🎉 Double Points Event started!');
+
+            // Clear announcement timeout if it exists
+            if (this.doublePointsAnnounceTimeout) {
+                clearTimeout(this.doublePointsAnnounceTimeout);
+                this.doublePointsAnnounceTimeout = null;
+            }
+
+            // Schedule event end in 20 minutes
+            this.doublePointsTimeout = setTimeout(async () => {
+                await this.stopDoublePointsEvent();
+            }, 20 * 60 * 1000); // 20 minutes
+
+        } catch (error) {
+            console.error('Error in startDoublePointsEvent:', error);
+        }
+    }
+
+    async stopDoublePointsEvent() {
+        try {
+            this.doublePointsActive = false;
+            console.log('🛑 Double Points Event ended!');
+
+            // Clear timeouts
+            if (this.doublePointsTimeout) {
+                clearTimeout(this.doublePointsTimeout);
+                this.doublePointsTimeout = null;
+            }
+
+            if (this.doublePointsAnnounceTimeout) {
+                clearTimeout(this.doublePointsAnnounceTimeout);
+                this.doublePointsAnnounceTimeout = null;
+            }
+
+            // Send end notification to the same channel where event was started
+            if (this.doublePointsEventChannel) {
+                const endEmbed = new EmbedBuilder()
+                    .setTitle('🏁 DOUBLE POINTS EVENT ENDED!')
+                    .setDescription('Thank you for participating! Points are back to normal.')
+                    .setColor('#FF0000')
+                    .setTimestamp();
+
+                await this.doublePointsEventChannel.send({ embeds: [endEmbed] });
+                this.doublePointsEventChannel = null; // Clear the stored channel
+            }
+
+        } catch (error) {
+            console.error('Error in stopDoublePointsEvent:', error);
+        }
     }
 
     async shutdown() {
