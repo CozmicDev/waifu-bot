@@ -19,7 +19,7 @@ async function refundUser() {
             SET total_points = total_points + 25000 
             WHERE discord_id = $1 
             RETURNING total_points, username
-        `, ['153872594217598976']);
+        `, ['115724975398322176']);
 
         if (result.rows.length > 0) {
             const user = result.rows[0];

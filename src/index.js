@@ -94,6 +94,8 @@ class WaifuBot {
                 await this.handleLuckyCommand(message);
             } else if (message.content.startsWith('!top')) {
                 await this.handleTopCommand(message);
+            } else if (message.content.startsWith('!search')) {
+                await this.handleSearchCommand(message);
             } else if (message.content.startsWith('!remove')) {
                 await this.handleRemoveCommand(message);
             } else if (message.content.startsWith('!give')) {
@@ -437,6 +439,39 @@ class WaifuBot {
         }
     }
 
+    async getCharacterOwner(characterId) {
+        try {
+            // Try to get the username with a LEFT JOIN to handle cases where username might not exist
+            const query = `
+                SELECT uc.*, u.username
+                FROM user_characters uc 
+                LEFT JOIN users u ON uc.user_id = u.id 
+                WHERE uc.character_id = $1 
+                LIMIT 1
+            `;
+            const result = await this.db.query(query, [characterId]);
+            
+            if (result.rows.length > 0) {
+                const row = result.rows[0];
+                return { username: row.username || `User ${row.user_id}` };
+            }
+            return null;
+        } catch (error) {
+            console.error('Error checking character ownership:', error);
+            // Fallback: Try without JOIN to see if character exists at all
+            try {
+                const fallbackQuery = 'SELECT user_id FROM user_characters WHERE character_id = $1 LIMIT 1';
+                const fallbackResult = await this.db.query(fallbackQuery, [characterId]);
+                if (fallbackResult.rows.length > 0) {
+                    return { username: `User ${fallbackResult.rows[0].user_id}` };
+                }
+            } catch (fallbackError) {
+                console.error('Fallback query also failed:', fallbackError);
+            }
+            return null;
+        }
+    }
+
     async handleTopCommand(message) {
         try {
             // Parse command: !top [page] (optional page number, default 1)
@@ -457,14 +492,28 @@ class WaifuBot {
                 .setTitle(`👑 Top Characters - Page ${page}`)
                 .setColor('#FFD700')
                 .setTimestamp()
-                .setFooter({ text: `Showing characters ${(page-1)*25 + 1}-${(page-1)*25 + topCharacters.length}` });
+                .setFooter({ text: `Showing characters ${(page-1)*25 + 1}-${(page-1)*25 + topCharacters.length} • 🟢 Available • 🔴 Owned` });
 
             let description = '';
-            topCharacters.forEach((character, index) => {
+            
+            // Check ownership for all characters on this page
+            for (let index = 0; index < topCharacters.length; index++) {
+                const character = topCharacters[index];
                 const rank = (page - 1) * 25 + index + 1;
                 const favCount = character.favorites?.toLocaleString() || '0';
-                description += `**${rank}.** ${character.name || 'Unknown'} - ❤️ ${favCount}\n`;
-            });
+                
+                // Check if character is owned
+                const ownerInfo = await this.getCharacterOwner(character.mal_id);
+                let statusText = '';
+                
+                if (ownerInfo) {
+                    statusText = `🔴 (${ownerInfo.username})`;
+                } else {
+                    statusText = '🟢 Available';
+                }
+                
+                description += `**${rank}.** ${character.name || 'Unknown'} - ❤️ ${favCount} ${statusText}\n`;
+            }
 
             embed.setDescription(description);
             
@@ -504,56 +553,180 @@ class WaifuBot {
         }
     }
 
+    async handleSearchCommand(message) {
+        try {
+            // Parse command: !search [character name]
+            const args = message.content.split(' ');
+            if (args.length < 2) {
+                await message.reply('❌ Please provide a character name to search for!\nUsage: `!search [character name]`');
+                return;
+            }
+            
+            const searchQuery = args.slice(1).join(' ');
+            await message.reply(`🔍 Searching for "${searchQuery}"...`);
+            
+            // Search for character on MAL
+            const searchResults = await this.searchCharacter(searchQuery);
+            
+            if (!searchResults || searchResults.length === 0) {
+                await message.reply(`❌ No characters found for "${searchQuery}"`);
+                return;
+            }
+            
+            // Get the first result (most relevant)
+            const character = searchResults[0];
+            
+            // Check if character is owned
+            const ownerInfo = await this.getCharacterOwner(character.mal_id);
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`🔍 Character Search: ${character.name || 'Unknown'}`)
+                .setColor(ownerInfo ? '#FF0000' : '#00FF00')
+                .setTimestamp();
+            
+            // Add character image if available
+            if (character.images?.jpg?.image_url) {
+                embed.setThumbnail(character.images.jpg.image_url);
+            }
+            
+            // Character information
+            let description = `**MAL ID:** ${character.mal_id}\n`;
+            if (character.name_kanji) {
+                description += `**Japanese Name:** ${character.name_kanji}\n`;
+            }
+            if (character.favorites) {
+                description += `**Favorites:** ${character.favorites.toLocaleString()}\n`;
+            }
+            
+            // Ownership status
+            if (ownerInfo) {
+                description += `\n🔴 **Status:** Owned by **${ownerInfo.username}**`;
+                embed.setFooter({ text: 'This character is already claimed!' });
+            } else {
+                description += `\n🟢 **Status:** Available for claiming`;
+                embed.setFooter({ text: 'This character can be claimed!' });
+            }
+            
+            // Add anime information if available
+            if (character.anime && character.anime.length > 0) {
+                const animeList = character.anime.slice(0, 3).map(anime => anime.title).join(', ');
+                description += `\n\n**Appears in:** ${animeList}`;
+                if (character.anime.length > 3) {
+                    description += ` and ${character.anime.length - 3} more...`;
+                }
+            }
+            
+            embed.setDescription(description);
+            
+            await message.channel.send({ embeds: [embed] });
+        } catch (error) {
+            console.error('Error in search command:', error);
+            await message.reply('❌ Failed to search for character!');
+        }
+    }
+
     async handleRemoveCommand(message) {
         try {
-            // Check if user is authorized (specific user ID)
             const authorizedUserId = '153872594217598976';
-            if (message.author.id !== authorizedUserId) {
-                await message.reply('❌ You are not authorized to use this command!');
-                return;
-            }
-
-            // Parse command: !remove @user <character_name>
+            const isAdmin = message.author.id === authorizedUserId;
+            
+            // Parse command: !remove [@user] <character_name> or !remove <character_name>
             const args = message.content.split(' ');
-            if (args.length < 3) {
-                await message.reply('❌ Usage: `!remove @user <character_name>`');
+            if (args.length < 2) {
+                const usage = isAdmin 
+                    ? '❌ Usage: `!remove @user <character_name>` (admin) or `!remove <character_name>` (self)'
+                    : '❌ Usage: `!remove <character_name>`';
+                await message.reply(usage);
                 return;
             }
 
-            // Extract mentioned user
+            // Check if this is admin removing from someone else (has mention) or self-removal
             const mentionedUser = message.mentions.users.first();
-            if (!mentionedUser) {
-                await message.reply('❌ Please mention a user to remove the character from!');
+            
+            if (mentionedUser && !isAdmin) {
+                await message.reply('❌ You can only remove characters from your own collection!\n\nUse: `!remove <character_name>`');
                 return;
             }
-
-            // Extract character name (everything after the mention)
-            const characterName = args.slice(2).join(' ').toLowerCase().trim();
-            if (!characterName) {
-                await message.reply('❌ Please provide a character name to remove!');
-                return;
+            
+            let targetUser, characterName, targetUserId;
+            
+            if (mentionedUser && isAdmin) {
+                // Admin removing from someone else
+                targetUser = mentionedUser;
+                characterName = args.slice(2).join(' ').toLowerCase().trim();
+                if (!characterName) {
+                    await message.reply('❌ Please provide a character name to remove!');
+                    return;
+                }
+                targetUserId = await this.getUserId(targetUser.id, targetUser.username);
+            } else {
+                // User removing from their own collection
+                targetUser = message.author;
+                characterName = args.slice(1).join(' ').toLowerCase().trim();
+                if (!characterName) {
+                    await message.reply('❌ Please provide a character name to remove!');
+                    return;
+                }
+                targetUserId = await this.getUserId(targetUser.id, targetUser.username);
             }
-
-            // Get the user ID from database
-            const targetUserId = await this.getUserId(mentionedUser.id, mentionedUser.username);
+            
+            console.log(`Remove command: looking for "${characterName}" in ${targetUser.username}'s collection`);
             
             // Get user's characters
             const userCharacters = await this.getUserCharacters(targetUserId);
             
-            // Find the character to remove (case-insensitive search)
-            const characterToRemove = userCharacters.find(char => 
-                char.name.toLowerCase().includes(characterName) ||
-                (char.name_kanji && char.name_kanji.toLowerCase().includes(characterName)) ||
-                (char.nicknames && char.nicknames.some(nick => nick.toLowerCase().includes(characterName)))
-            );
+            if (userCharacters.length === 0) {
+                const emptyMessage = isAdmin && mentionedUser 
+                    ? `❌ ${targetUser.username} doesn't have any characters to remove!`
+                    : '❌ You don\'t have any characters to remove!';
+                await message.reply(emptyMessage);
+                return;
+            }
+            
+            console.log(`Found ${userCharacters.length} characters for ${targetUser.username}`);
+            
+            // Find the character to remove (case-insensitive search with robust error handling)
+            const characterToRemove = userCharacters.find(char => {
+                try {
+                    if (!char) return false;
+                    
+                    // Check name field
+                    if (char.name && typeof char.name === 'string' && char.name.toLowerCase().includes(characterName)) {
+                        return true;
+                    }
+                    
+                    // Check character_name field
+                    if (char.character_name && typeof char.character_name === 'string' && char.character_name.toLowerCase().includes(characterName)) {
+                        return true;
+                    }
+                    
+                    // Check name_kanji field
+                    if (char.name_kanji && typeof char.name_kanji === 'string' && char.name_kanji.toLowerCase().includes(characterName)) {
+                        return true;
+                    }
+                    
+                    // Check nicknames array
+                    if (char.nicknames && Array.isArray(char.nicknames)) {
+                        return char.nicknames.some(nick => nick && typeof nick === 'string' && nick.toLowerCase().includes(characterName));
+                    }
+                    
+                    return false;
+                } catch (error) {
+                    console.error('Error checking character:', char, error);
+                    return false;
+                }
+            });
 
             if (!characterToRemove) {
-                await message.reply(`❌ Character "${characterName}" not found in ${mentionedUser.username}'s collection!`);
+                const notFoundMessage = isAdmin && mentionedUser
+                    ? `❌ Character "${characterName}" not found in ${targetUser.username}'s collection!`
+                    : `❌ Character "${characterName}" not found in your collection!\n\nUse \`!collection\` to see your characters.`;
+                await message.reply(notFoundMessage);
                 return;
             }
 
             // Remove the character from user's collection
-            const result = await this.pool.query(
+            const result = await this.db.query(
                 'DELETE FROM user_characters WHERE user_id = $1 AND character_id = $2',
                 [targetUserId, characterToRemove.character_id]
             );
@@ -561,17 +734,30 @@ class WaifuBot {
             if (result.rowCount > 0) {
                 const embed = new EmbedBuilder()
                     .setTitle('✅ Character Removed')
-                    .setDescription(`Successfully removed **${characterToRemove.name}** from ${mentionedUser.username}'s collection!`)
                     .setColor('#FF0000')
                     .setTimestamp();
 
-                if (characterToRemove.images?.jpg?.image_url) {
-                    embed.setThumbnail(characterToRemove.images.jpg.image_url);
+                const displayName = characterToRemove.name || characterToRemove.character_name || 'Unknown Character';
+
+                if (isAdmin && mentionedUser) {
+                    // Admin removal message
+                    embed.setDescription(`Successfully removed **${displayName}** from ${targetUser.username}'s collection!`);
+                    console.log(`Character ${displayName} (ID: ${characterToRemove.character_id}) removed from user ${targetUser.username} (${targetUser.id}) by admin ${message.author.username}`);
+                } else {
+                    // Self removal message
+                    embed.setDescription(`Successfully removed **${displayName}** from your collection!`)
+                         .addFields([
+                             { name: '💔 Favorites Lost', value: `${characterToRemove.character_favorites || 0}`, inline: true },
+                             { name: '📅 Originally Claimed', value: characterToRemove.claimed_at ? new Date(characterToRemove.claimed_at).toLocaleDateString() : 'Unknown', inline: true }
+                         ]);
+                    console.log(`Character ${displayName} (ID: ${characterToRemove.character_id}) removed from user ${targetUser.username} (${targetUser.id}) by themselves`);
+                }
+
+                if (characterToRemove.character_image_url) {
+                    embed.setThumbnail(characterToRemove.character_image_url);
                 }
 
                 await message.reply({ embeds: [embed] });
-                
-                console.log(`Character ${characterToRemove.name} (ID: ${characterToRemove.character_id}) removed from user ${mentionedUser.username} (${mentionedUser.id}) by admin ${message.author.username}`);
             } else {
                 await message.reply('❌ Failed to remove character from collection!');
             }
@@ -612,14 +798,28 @@ class WaifuBot {
                 .setTitle(`👑 Top Characters - Page ${page}`)
                 .setColor('#FFD700')
                 .setTimestamp()
-                .setFooter({ text: `Showing characters ${(page-1)*25 + 1}-${(page-1)*25 + topCharacters.length}` });
+                .setFooter({ text: `Showing characters ${(page-1)*25 + 1}-${(page-1)*25 + topCharacters.length} • 🟢 Available • 🔴 Owned` });
 
             let description = '';
-            topCharacters.forEach((character, index) => {
+            
+            // Check ownership for all characters on this page
+            for (let index = 0; index < topCharacters.length; index++) {
+                const character = topCharacters[index];
                 const rank = (page - 1) * 25 + index + 1;
                 const favCount = character.favorites?.toLocaleString() || '0';
-                description += `**${rank}.** ${character.name || 'Unknown'} - ❤️ ${favCount}\n`;
-            });
+                
+                // Check if character is owned
+                const ownerInfo = await this.getCharacterOwner(character.mal_id);
+                let statusText = '';
+                
+                if (ownerInfo) {
+                    statusText = `🔴 (${ownerInfo.username})`;
+                } else {
+                    statusText = '🟢 Available';
+                }
+                
+                description += `**${rank}.** ${character.name || 'Unknown'} - ❤️ ${favCount} ${statusText}\n`;
+            }
 
             embed.setDescription(description);
             
@@ -1490,14 +1690,16 @@ class WaifuBot {
             }
 
             const embed = new EmbedBuilder()
-                .setTitle('🏆 Leaderboard - Top 10')
+                .setTitle('🏆 Leaderboard - Top 10 by Favorites')
                 .setColor(0x00AE86)
-                .setTimestamp();
+                .setTimestamp()
+                .setFooter({ text: 'Ranked by total favorites of all owned characters' });
 
             let description = '';
             topUsers.forEach((user, index) => {
                 const medal = index < 3 ? ['🥇', '🥈', '🥉'][index] : `${index + 1}.`;
-                description += `${medal} **${user.username}** - ${user.total_points} points\n`;
+                const favorites = parseInt(user.total_favorites).toLocaleString();
+                description += `${medal} **${user.username}** - ❤️ ${favorites} favorites\n`;
             });
 
             embed.setDescription(description);
@@ -1647,6 +1849,36 @@ class WaifuBot {
             return characters;
         } catch (error) {
             console.error(`Error fetching top characters page ${page}:`, error.message);
+            return null;
+        }
+    }
+
+    async searchCharacter(query) {
+        try {
+            const cacheKey = `search_character:${query.toLowerCase()}`;
+            
+            // Try to get from cache first
+            const cached = await this.redis.get(cacheKey);
+            if (cached) {
+                return JSON.parse(cached);
+            }
+
+            // Search for character on MAL
+            const response = await axios.get(`${process.env.JIKAN_BASE_URL}/characters`, {
+                params: {
+                    q: query,
+                    limit: 10
+                }
+            });
+            
+            const characters = response.data.data;
+
+            // Cache the result for 30 minutes
+            await this.redis.setEx(cacheKey, 1800, JSON.stringify(characters));
+            
+            return characters;
+        } catch (error) {
+            console.error(`Error searching for character "${query}":`, error.message);
             return null;
         }
     }
@@ -1857,9 +2089,12 @@ class WaifuBot {
 
     async getTopUsers(limit = 10) {
         const query = `
-            SELECT username, total_points 
-            FROM users 
-            ORDER BY total_points DESC 
+            SELECT u.username, u.total_points,
+                   COALESCE(SUM(uc.character_favorites), 0) as total_favorites
+            FROM users u
+            LEFT JOIN user_characters uc ON u.id = uc.user_id
+            GROUP BY u.id, u.username, u.total_points
+            ORDER BY total_favorites DESC 
             LIMIT $1
         `;
         const result = await this.db.query(query, [limit]);
@@ -2803,6 +3038,28 @@ class WaifuBot {
                 text: `Page ${currentPage}/${totalPages} • Total: ${characters.length} characters` 
             });
 
+        // Find the character with the highest favorites on this page
+        let highestFavoritedChar = null;
+        let maxFavorites = -1;
+        
+        pageCharacters.forEach(char => {
+            const favorites = char.character_favorites || 0;
+            if (favorites > maxFavorites) {
+                maxFavorites = favorites;
+                highestFavoritedChar = char;
+            }
+        });
+
+        // If no character has favorites, use the first character with an image
+        if (!highestFavoritedChar || maxFavorites === 0) {
+            highestFavoritedChar = pageCharacters.find(char => char.character_image_url) || pageCharacters[0];
+        }
+
+        // Set the thumbnail to the highest favorited character's image
+        if (highestFavoritedChar && highestFavoritedChar.character_image_url) {
+            embed.setThumbnail(highestFavoritedChar.character_image_url);
+        }
+
         let description = '';
         pageCharacters.forEach((char, index) => {
             const globalIndex = startIndex + index + 1;
@@ -2810,7 +3067,11 @@ class WaifuBot {
             const role = char.character_role ? ` - ${char.character_role}` : '';
             const favorites = char.character_favorites || 0;
             const favoritesDisplay = favorites > 0 ? ` ❤️ ${favorites}` : '';
-            description += `${globalIndex}. **${char.character_name}**${anime}${role}${favoritesDisplay}\n`;
+            
+            // Add a crown emoji next to the highest favorited character
+            const crownEmoji = char === highestFavoritedChar && maxFavorites > 0 ? ' 👑' : '';
+            
+            description += `${globalIndex}. **${char.character_name}**${anime}${role}${favoritesDisplay}${crownEmoji}\n`;
         });
 
         embed.setDescription(description || 'No characters on this page.');
@@ -2907,7 +3168,7 @@ class WaifuBot {
                     },
                     { 
                         name: '📊 !leaderboard', 
-                        value: 'View the top 10 players', 
+                        value: 'View the top 10 players by total character favorites', 
                         inline: true 
                     },
                     { 
@@ -2916,8 +3177,13 @@ class WaifuBot {
                         inline: false 
                     },
                     { 
-                        name: '🔄 !trade @user character name', 
-                        value: 'Start a trade with another user\n• Example: `!trade @vicky Naruto Uzumaki`\n• Target user responds with: `!trade @you character name`\n• Both users confirm with ✅ or cancel with ❌', 
+                        name: '�️ !removemy <character_name>', 
+                        value: 'Remove a character from your own collection\n• Example: `!removemy Naruto`\n• This action cannot be undone!', 
+                        inline: false 
+                    },
+                    { 
+                        name: '�🔄 !trade @user character name', 
+                        value: 'Start a trade with another user\n• Example: `!trade @vicky Naruto Uzumaki`\n• Target user responds with: `!trade @you character name`\n• Trade auto-completes in 15 seconds when both characters are selected', 
                         inline: false 
                     },
                     { 
@@ -2929,6 +3195,16 @@ class WaifuBot {
                         name: '📋 !packs', 
                         value: 'View all available character packs with detailed information', 
                         inline: true 
+                    },
+                    { 
+                        name: '👑 !top [page]', 
+                        value: 'View the most popular characters on MyAnimeList\n• Shows ownership status (🟢 Available / 🔴 Owned)\n• Example: `!top 2` for page 2', 
+                        inline: false 
+                    },
+                    { 
+                        name: '🔍 !search <character name>', 
+                        value: 'Search for a specific character on MyAnimeList\n• Shows if character is available or who owns it\n• Example: `!search Naruto Uzumaki`', 
+                        inline: false 
                     },
                     { 
                         name: '🎁 !give @user character', 
@@ -3146,77 +3422,49 @@ class WaifuBot {
                         inline: true
                     },
                     {
-                        name: `  ${targetUser.username} offers:`,
+                        name: `📤 ${targetUser.username} offers:`,
                         value: `**${tradeData.targetSelection.character_name}**\n${tradeData.targetSelection.anime_title || 'Unknown Anime'}${tradeData.targetSelection.character_favorites > 0 ? `\n❤️ ${tradeData.targetSelection.character_favorites} favorites` : ''}`,
                         inline: true
                     },
                     {
                         name: '📋 Status',
-                        value: '🎯 Both characters selected! React with ✅ to confirm or ❌ to cancel.\n\n⚠️ **Both users must confirm to complete the trade.**',
+                        value: '🎯 Both characters selected! Trade will auto-complete in 15 seconds.\n\n❌ Click cancel if you want to stop the trade.',
                         inline: false
                     }
                 )
-                .setFooter({ text: 'Both users must confirm to complete the trade' })
+                .setFooter({ text: 'Trade will automatically complete in 15 seconds' })
                 .setTimestamp();
 
-            // Create new buttons with both enabled
-            const initiatorConfirmButton = new ButtonBuilder()
-                .setCustomId(`trade_confirm_init_${tradeId}`)
-                .setLabel(`✅ ${initiatorUser.username} Confirm`)
-                .setStyle(ButtonStyle.Success)
-                .setDisabled(false);
-
-            const targetConfirmButton = new ButtonBuilder()
-                .setCustomId(`trade_confirm_target_${tradeId}`)
-                .setLabel(`✅ ${targetUser.username} Confirm`)
-                .setStyle(ButtonStyle.Success)
-                .setDisabled(false);
-
+            // Create cancel button only
             const cancelButton = new ButtonBuilder()
                 .setCustomId(`trade_cancel_${tradeId}`)
                 .setLabel('❌ Cancel Trade')
                 .setStyle(ButtonStyle.Danger);
 
-            const row = new ActionRowBuilder().addComponents(initiatorConfirmButton, targetConfirmButton, cancelButton);
+            const row = new ActionRowBuilder().addComponents(cancelButton);
 
-            // Update trade status
-            tradeData.status = 'confirming';
-
+            // Update the message
             await message.edit({ embeds: [embed], components: [row] });
+
+            // Clear existing timeout if any
+            if (tradeData.timeoutId) {
+                clearTimeout(tradeData.timeoutId);
+            }
+
+            // Start 15-second auto-completion timer
+            const autoCompleteTimeout = setTimeout(async () => {
+                if (this.pendingTrades.has(tradeId)) {
+                    console.log(`⏰ Auto-completing trade ${tradeId} after 15 seconds`);
+                    await this.completeTrade(tradeId, message);
+                }
+            }, 15000); // 15 seconds
+
+            // Update trade data with new timeout
+            tradeData.timeoutId = autoCompleteTimeout;
+            tradeData.status = 'auto_confirming';
 
         } catch (error) {
             console.error('Error updating trade embed:', error);
-        }
-    }
-
-
-
-    async handleTradeReaction(tradeId, reaction, user, message) {
-        try {
-            const tradeData = this.pendingTrades.get(tradeId);
-            if (!tradeData) return;
-
-            const isInitiator = user.id === tradeData.initiatorId;
-            const isTarget = user.id === tradeData.targetId;
-
-            if (!isInitiator && !isTarget) return;
-
-            // Check if both characters are selected
-            if (!tradeData.initiatorSelection || !tradeData.targetSelection) {
-                return; // Ignore reactions until both characters are selected
-            }
-
-            if (reaction.emoji.name === '❌') {
-                // Cancel trade and clear timer
-                if (tradeData.autoCompleteTimer) {
-                    clearTimeout(tradeData.autoCompleteTimer);
-                }
-                await this.cancelTrade(tradeId, message);
-                return;
-            }
-
-        } catch (error) {
-            console.error('Error handling trade reaction:', error);
         }
     }
 
@@ -3224,42 +3472,22 @@ class WaifuBot {
         try {
             const customId = interaction.customId;
             
-            // Parse the custom ID
-            let tradeId, action, userType;
-            
-            if (customId.startsWith('trade_confirm_init_')) {
-                tradeId = customId.replace('trade_confirm_init_', '');
-                action = 'confirm';
-                userType = 'initiator';
-            } else if (customId.startsWith('trade_confirm_target_')) {
-                tradeId = customId.replace('trade_confirm_target_', '');
-                action = 'confirm';
-                userType = 'target';
-            } else if (customId.startsWith('trade_cancel_')) {
-                tradeId = customId.replace('trade_cancel_', '');
-                action = 'cancel';
-                userType = null;
-            } else {
-                await interaction.reply({ 
-                    content: '❌ Invalid trade button!', 
-                    ephemeral: true 
-                });
-                return;
-            }
+            // Only handle cancel buttons now
+            if (customId.startsWith('trade_cancel_')) {
+                const tradeId = customId.replace('trade_cancel_', '');
+                
+                const tradeData = this.pendingTrades.get(tradeId);
 
-            const tradeData = this.pendingTrades.get(tradeId);
+                if (!tradeData) {
+                    console.log(`❌ Trade not found: ${tradeId}`);
+                    console.log(`📊 Available trades: ${Array.from(this.pendingTrades.keys()).join(', ')}`);
+                    await interaction.reply({ 
+                        content: '❌ This trade has expired or been completed!', 
+                        ephemeral: true 
+                    });
+                    return;
+                }
 
-            if (!tradeData) {
-                console.log(`❌ Trade not found: ${tradeId}`);
-                console.log(`📊 Available trades: ${Array.from(this.pendingTrades.keys()).join(', ')}`);
-                await interaction.reply({ 
-                    content: '❌ This trade has expired or been completed!', 
-                    ephemeral: true 
-                });
-                return;
-            }
-
-            if (action === 'cancel') {
                 // Check if user is authorized to cancel
                 if (interaction.user.id !== tradeData.initiatorId && interaction.user.id !== tradeData.targetId) {
                     await interaction.reply({ 
@@ -3275,56 +3503,12 @@ class WaifuBot {
                     ephemeral: true 
                 });
                 return;
-            }
-
-            if (action === 'confirm') {
-                // Check if both characters are selected
-                if (!tradeData.initiatorSelection || !tradeData.targetSelection) {
-                    await interaction.reply({ 
-                        content: '❌ Both characters must be selected before confirming!', 
-                        ephemeral: true 
-                    });
-                    return;
-                }
-
-                // Check if the correct user is clicking
-                const isInitiator = userType === 'initiator' && interaction.user.id === tradeData.initiatorId;
-                const isTarget = userType === 'target' && interaction.user.id === tradeData.targetId;
-
-                if (!isInitiator && !isTarget) {
-                    await interaction.reply({ 
-                        content: '❌ You are not authorized to confirm this trade!', 
-                        ephemeral: true 
-                    });
-                    return;
-                }
-
-                // Mark confirmation
-                if (isInitiator) {
-                    tradeData.initiatorConfirmed = true;
-                    await interaction.reply({ 
-                        content: '✅ You have confirmed the trade! Waiting for the other user...', 
-                        ephemeral: true 
-                    });
-                } else {
-                    tradeData.targetConfirmed = true;
-                    await interaction.reply({ 
-                        content: '✅ You have confirmed the trade! Waiting for the other user...', 
-                        ephemeral: true 
-                    });
-                }
-
-                // Update the embed to show confirmation status
-                await this.updateTradeConfirmationStatus(interaction.message, tradeData);
-
-                // Check if both have confirmed
-                if (tradeData.initiatorConfirmed && tradeData.targetConfirmed) {
-                    console.log(`✅ Both users confirmed trade ${tradeId}, completing...`);
-                    // Small delay to let users see the confirmation status
-                    setTimeout(async () => {
-                        await this.completeTrade(tradeId, interaction.message);
-                    }, 1000); // Reduced from 2000ms to 1000ms
-                }
+            } else {
+                await interaction.reply({ 
+                    content: '❌ Invalid trade button!', 
+                    ephemeral: true 
+                });
+                return;
             }
 
         } catch (error) {
@@ -3337,68 +3521,6 @@ class WaifuBot {
             }
         }
     }
-
-    async updateTradeConfirmationStatus(message, tradeData) {
-        try {
-            const initiatorUser = await this.client.users.fetch(tradeData.initiatorId);
-            const targetUser = await this.client.users.fetch(tradeData.targetId);
-
-            const embed = new EmbedBuilder()
-                .setTitle('🔄 Trade Confirmation')
-                .setColor(0xFFD700)
-                .setDescription(`**${initiatorUser.username}** and **${targetUser.username}** are confirming their trade!`)
-                .addFields(
-                    {
-                        name: `📤 ${initiatorUser.username} offers:`,
-                        value: `**${tradeData.initiatorSelection.character_name}**\n${tradeData.initiatorSelection.anime_title || 'Unknown Anime'}${tradeData.initiatorSelection.character_favorites > 0 ? `\n❤️ ${tradeData.initiatorSelection.character_favorites} favorites` : ''}`,
-                        inline: true
-                    },
-                    {
-                        name: `📤 ${targetUser.username} offers:`,
-                        value: `**${tradeData.targetSelection.character_name}**\n${tradeData.targetSelection.anime_title || 'Unknown Anime'}${tradeData.targetSelection.character_favorites > 0 ? `\n❤️ ${tradeData.targetSelection.character_favorites} favorites` : ''}`,
-                        inline: true
-                    },
-                    {
-                        name: '📋 Confirmation Status',
-                        value: `${initiatorUser.username}: ${tradeData.initiatorConfirmed ? '✅ Confirmed' : '⏳ Waiting...'}\n${targetUser.username}: ${tradeData.targetConfirmed ? '✅ Confirmed' : '⏳ Waiting...'}`,
-                        inline: false
-                    }
-                )
-                .setFooter({ text: tradeData.initiatorConfirmed && tradeData.targetConfirmed ? 'Trade will complete in a moment...' : 'Waiting for confirmations...' })
-                .setTimestamp();
-
-            // Get current trade ID
-            const tradeId = Object.keys(this.pendingTrades).find(id => this.pendingTrades.get(id) === tradeData);
-
-            // Create updated buttons
-            const initiatorConfirmButton = new ButtonBuilder()
-                .setCustomId(`trade_confirm_init_${tradeId}`)
-                .setLabel(`${tradeData.initiatorConfirmed ? '✅' : '⏳'} ${initiatorUser.username}`)
-                .setStyle(tradeData.initiatorConfirmed ? ButtonStyle.Success : ButtonStyle.Secondary)
-                .setDisabled(tradeData.initiatorConfirmed);
-
-            const targetConfirmButton = new ButtonBuilder()
-                .setCustomId(`trade_confirm_target_${tradeId}`)
-                .setLabel(`${tradeData.targetConfirmed ? '✅' : '⏳'} ${targetUser.username}`)
-                .setStyle(tradeData.targetConfirmed ? ButtonStyle.Success : ButtonStyle.Secondary)
-                .setDisabled(tradeData.targetConfirmed);
-
-            const cancelButton = new ButtonBuilder()
-                .setCustomId(`trade_cancel_${tradeId}`)
-                .setLabel('❌ Cancel Trade')
-                .setStyle(ButtonStyle.Danger)
-                .setDisabled(tradeData.initiatorConfirmed && tradeData.targetConfirmed);
-
-            const row = new ActionRowBuilder().addComponents(initiatorConfirmButton, targetConfirmButton, cancelButton);
-
-            await message.edit({ embeds: [embed], components: [row] });
-
-        } catch (error) {
-            console.error('Error updating trade confirmation status:', error);
-        }
-    }
-
-
 
     async completeTrade(tradeId, message) {
         try {
