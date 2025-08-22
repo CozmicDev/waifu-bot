@@ -35,14 +35,13 @@ async function setupDatabase() {
             CREATE TABLE IF NOT EXISTS user_characters (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER REFERENCES users(id),
-                character_id INTEGER NOT NULL,
+                character_id INTEGER NOT NULL UNIQUE,
                 character_name VARCHAR(255),
                 character_image_url TEXT,
                 anime_title VARCHAR(255),
                 character_role VARCHAR(50),
                 character_favorites INTEGER DEFAULT 0,
-                claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, character_id)
+                claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `);
 

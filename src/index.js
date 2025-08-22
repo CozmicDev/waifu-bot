@@ -88,8 +88,14 @@ class WaifuBot {
                 await this.handleTradeCommand(message);
             } else if (message.content.startsWith('!pack')) {
                 await this.handlePackCommand(message);
+            } else if (message.content.startsWith('!packs')) {
+                await this.handlePacksCommand(message);
             } else if (message.content.startsWith('!lucky')) {
                 await this.handleLuckyCommand(message);
+            } else if (message.content.startsWith('!top')) {
+                await this.handleTopCommand(message);
+            } else if (message.content.startsWith('!remove')) {
+                await this.handleRemoveCommand(message);
             } else if (message.content.startsWith('!give')) {
                 await this.handleGiveCommand(message);
             } else if (message.content.startsWith('!test')) {
@@ -112,12 +118,20 @@ class WaifuBot {
                     await this.handleTradeButton(interaction);
                 } else if (interaction.customId.startsWith('pack_confirm_')) {
                     await this.handlePackConfirmation(interaction);
+                } else if (interaction.customId.startsWith('newpack_confirm_')) {
+                    await this.handleNewPackConfirmation(interaction);
+                } else if (interaction.customId.startsWith('newpack_cancel_')) {
+                    await this.handleNewPackCancel(interaction);
+                } else if (interaction.customId.startsWith('packroll_')) {
+                    await this.handlePackRollButton(interaction);
                 } else if (interaction.customId.startsWith('pack_cancel_')) {
                     await this.handlePackConfirmation(interaction);
                 } else if (interaction.customId.startsWith('give_confirm_')) {
                     await this.handleGiveConfirmation(interaction);
                 } else if (interaction.customId.startsWith('give_cancel_')) {
                     await this.handleGiveConfirmation(interaction);
+                } else if (interaction.customId.startsWith('top_')) {
+                    await this.handleTopPagination(interaction);
                 }
             } else if (interaction.isStringSelectMenu()) {
                 if (interaction.customId.startsWith('collection_')) {
@@ -229,6 +243,9 @@ class WaifuBot {
             const userId = await this.getUserId(message.author.id, message.author.username);
             const alreadyOwned = await this.checkCharacterOwnership(userId, character.mal_id);
             
+            // Check if ANY user owns this character (global ownership)
+            const globalOwnership = await this.checkGlobalCharacterOwnership(character.mal_id);
+            
             // Get current lucky roll progress before checking
             // Get current lucky roll count BEFORE incrementing
             const preRollProgress = await this.getLuckyRollProgress(message.author.id);
@@ -255,14 +272,57 @@ class WaifuBot {
             
             const rollsLeft = cooldownCheck.rollsLeft - 1;
 
-            if (alreadyOwned) {
-                // Give duplicate bonus immediately - no need to claim
-                points += 150;
+            // Check if character is already owned by someone (globally)
+            if (globalOwnership) {
+                // Give 150 points for rolling a character that's already owned by someone
+                const duplicatePoints = 150;
                 isDuplicate = true;
-                await this.addUserPoints(message.author.id, message.author.username, points);
-                await this.recordRoll(userId, character.mal_id, character, points, isDuplicate);
+                await this.addUserPoints(message.author.id, message.author.username, duplicatePoints);
+                await this.recordRoll(userId, character.mal_id, character, duplicatePoints, isDuplicate);
 
-                const embed = this.createCharacterEmbed(character, points, message.author, animeInfo, isDuplicate, rollsLeft, isLuckyRoll, displayProgress);
+                // Create embed showing it's a duplicate
+                const embed = new EmbedBuilder()
+                    .setTitle(character.name || 'Unknown Character')
+                    .setColor(0xFFD700) // Gold for duplicates
+                    .setThumbnail(character.images?.jpg?.image_url || character.image_url)
+                    .addFields(
+                        { name: '❤️ Favorites', value: (character.favorites || 0).toString(), inline: true },
+                        { name: '🏆 Points Earned', value: duplicatePoints.toString(), inline: true },
+                        { name: '👤 Already Owned By', value: `User ID: ${globalOwnership.user_id}`, inline: true }
+                    )
+                    .setDescription('❌ **Character Already Claimed!**\nThis character is already owned by another user. You received 150 points instead.')
+                    .setFooter({ 
+                        text: `Rolled by ${message.author.username} • Duplicate!${isLuckyRoll ? ' • 🍀✨ LUCKY ROLL! ✨🍀' : ''}`, 
+                        iconURL: message.author.displayAvatarURL() 
+                    })
+                    .setTimestamp();
+
+                // Add lucky roll progress if available
+                if (displayProgress) {
+                    embed.addFields({
+                        name: '🍀 Lucky Roll Progress',
+                        value: `${displayProgress.currentCount}/10 rolls`,
+                        inline: true
+                    });
+                }
+
+                // Add anime information if available
+                if (animeInfo) {
+                    embed.addFields({ 
+                        name: '📺 Anime', 
+                        value: animeInfo.title || 'Unknown Anime', 
+                        inline: true 
+                    });
+                    
+                    if (animeInfo.role) {
+                        embed.addFields({ 
+                            name: '🎭 Role', 
+                            value: animeInfo.role, 
+                            inline: true 
+                        });
+                    }
+                }
+
                 await message.reply({ embeds: [embed] });
             } else {
                 // Create claim button and conditionally create snipe button
@@ -377,6 +437,238 @@ class WaifuBot {
         }
     }
 
+    async handleTopCommand(message) {
+        try {
+            // Parse command: !top [page] (optional page number, default 1)
+            const args = message.content.split(' ');
+            const page = args[1] ? Math.max(1, parseInt(args[1])) : 1;
+            
+            await message.reply('🔍 Fetching top characters...');
+            
+            // Fetch top characters from Jikan API
+            const topCharacters = await this.getTopCharacters(page);
+            
+            if (!topCharacters || topCharacters.length === 0) {
+                await message.reply('❌ Failed to fetch top characters!');
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle(`👑 Top Characters - Page ${page}`)
+                .setColor('#FFD700')
+                .setTimestamp()
+                .setFooter({ text: `Showing characters ${(page-1)*25 + 1}-${(page-1)*25 + topCharacters.length}` });
+
+            let description = '';
+            topCharacters.forEach((character, index) => {
+                const rank = (page - 1) * 25 + index + 1;
+                const favCount = character.favorites?.toLocaleString() || '0';
+                description += `**${rank}.** ${character.name || 'Unknown'} - ❤️ ${favCount}\n`;
+            });
+
+            embed.setDescription(description);
+            
+            // Add first character's image as thumbnail
+            if (topCharacters[0]?.images?.jpg?.image_url) {
+                embed.setThumbnail(topCharacters[0].images.jpg.image_url);
+            }
+
+            // Create pagination buttons
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`top_${Math.max(1, page - 1)}`)
+                        .setLabel('◀️ Previous')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setDisabled(page <= 1),
+                    new ButtonBuilder()
+                        .setCustomId(`top_first_1`)
+                        .setLabel('First Page')
+                        .setStyle(ButtonStyle.Primary)
+                        .setDisabled(page === 1),
+                    new ButtonBuilder()
+                        .setCustomId(`top_${page + 1}`)
+                        .setLabel('Next ▶️')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId(`top_last_100`)
+                        .setLabel('Page 100')
+                        .setStyle(ButtonStyle.Primary)
+                        .setDisabled(page === 100)
+                );
+
+            await message.channel.send({ embeds: [embed], components: [row] });
+        } catch (error) {
+            console.error('Error in top command:', error);
+            await message.reply('❌ Failed to fetch top characters!');
+        }
+    }
+
+    async handleRemoveCommand(message) {
+        try {
+            // Check if user is authorized (specific user ID)
+            const authorizedUserId = '153872594217598976';
+            if (message.author.id !== authorizedUserId) {
+                await message.reply('❌ You are not authorized to use this command!');
+                return;
+            }
+
+            // Parse command: !remove @user <character_name>
+            const args = message.content.split(' ');
+            if (args.length < 3) {
+                await message.reply('❌ Usage: `!remove @user <character_name>`');
+                return;
+            }
+
+            // Extract mentioned user
+            const mentionedUser = message.mentions.users.first();
+            if (!mentionedUser) {
+                await message.reply('❌ Please mention a user to remove the character from!');
+                return;
+            }
+
+            // Extract character name (everything after the mention)
+            const characterName = args.slice(2).join(' ').toLowerCase().trim();
+            if (!characterName) {
+                await message.reply('❌ Please provide a character name to remove!');
+                return;
+            }
+
+            // Get the user ID from database
+            const targetUserId = await this.getUserId(mentionedUser.id, mentionedUser.username);
+            
+            // Get user's characters
+            const userCharacters = await this.getUserCharacters(targetUserId);
+            
+            // Find the character to remove (case-insensitive search)
+            const characterToRemove = userCharacters.find(char => 
+                char.name.toLowerCase().includes(characterName) ||
+                (char.name_kanji && char.name_kanji.toLowerCase().includes(characterName)) ||
+                (char.nicknames && char.nicknames.some(nick => nick.toLowerCase().includes(characterName)))
+            );
+
+            if (!characterToRemove) {
+                await message.reply(`❌ Character "${characterName}" not found in ${mentionedUser.username}'s collection!`);
+                return;
+            }
+
+            // Remove the character from user's collection
+            const result = await this.pool.query(
+                'DELETE FROM user_characters WHERE user_id = $1 AND character_id = $2',
+                [targetUserId, characterToRemove.character_id]
+            );
+
+            if (result.rowCount > 0) {
+                const embed = new EmbedBuilder()
+                    .setTitle('✅ Character Removed')
+                    .setDescription(`Successfully removed **${characterToRemove.name}** from ${mentionedUser.username}'s collection!`)
+                    .setColor('#FF0000')
+                    .setTimestamp();
+
+                if (characterToRemove.images?.jpg?.image_url) {
+                    embed.setThumbnail(characterToRemove.images.jpg.image_url);
+                }
+
+                await message.reply({ embeds: [embed] });
+                
+                console.log(`Character ${characterToRemove.name} (ID: ${characterToRemove.character_id}) removed from user ${mentionedUser.username} (${mentionedUser.id}) by admin ${message.author.username}`);
+            } else {
+                await message.reply('❌ Failed to remove character from collection!');
+            }
+
+        } catch (error) {
+            console.error('Error in remove command:', error);
+            await message.reply('❌ An error occurred while removing the character!');
+        }
+    }
+
+    async handleTopPagination(interaction) {
+        try {
+            // Extract page number from customId
+            let page;
+            if (interaction.customId.startsWith('top_first_')) {
+                page = 1;
+            } else if (interaction.customId.startsWith('top_last_')) {
+                page = 100;
+            } else {
+                // Regular page number (top_X)
+                page = parseInt(interaction.customId.split('_')[1]);
+            }
+            
+            await interaction.deferUpdate();
+            
+            // Fetch top characters from Jikan API
+            const topCharacters = await this.getTopCharacters(page);
+            
+            if (!topCharacters || topCharacters.length === 0) {
+                await interaction.followUp({ 
+                    content: '❌ Failed to fetch top characters!', 
+                    flags: 64 
+                });
+                return;
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle(`👑 Top Characters - Page ${page}`)
+                .setColor('#FFD700')
+                .setTimestamp()
+                .setFooter({ text: `Showing characters ${(page-1)*25 + 1}-${(page-1)*25 + topCharacters.length}` });
+
+            let description = '';
+            topCharacters.forEach((character, index) => {
+                const rank = (page - 1) * 25 + index + 1;
+                const favCount = character.favorites?.toLocaleString() || '0';
+                description += `**${rank}.** ${character.name || 'Unknown'} - ❤️ ${favCount}\n`;
+            });
+
+            embed.setDescription(description);
+            
+            // Add first character's image as thumbnail
+            if (topCharacters[0]?.images?.jpg?.image_url) {
+                embed.setThumbnail(topCharacters[0].images.jpg.image_url);
+            }
+
+            // Create pagination buttons
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`top_${Math.max(1, page - 1)}`)
+                        .setLabel('◀️ Previous')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setDisabled(page <= 1),
+                    new ButtonBuilder()
+                        .setCustomId(`top_first_1`)
+                        .setLabel('First Page')
+                        .setStyle(ButtonStyle.Primary)
+                        .setDisabled(page === 1),
+                    new ButtonBuilder()
+                        .setCustomId(`top_${page + 1}`)
+                        .setLabel('Next ▶️')
+                        .setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder()
+                        .setCustomId(`top_last_100`)
+                        .setLabel('Page 100')
+                        .setStyle(ButtonStyle.Primary)
+                        .setDisabled(page === 100)
+                );
+
+            await interaction.editReply({ embeds: [embed], components: [row] });
+        } catch (error) {
+            console.error('Error in top pagination:', error);
+            if (!interaction.replied && !interaction.deferred) {
+                await interaction.reply({ 
+                    content: '❌ Failed to update top characters!', 
+                    flags: 64 
+                });
+            } else {
+                await interaction.followUp({ 
+                    content: '❌ Failed to update top characters!', 
+                    flags: 64 
+                });
+            }
+        }
+    }
+
     async handleGiveCommand(message) {
         try {
             // Check if user is admin
@@ -471,20 +763,79 @@ class WaifuBot {
         }
     }
 
+    async handlePacksCommand(message) {
+        try {
+            const embed = new EmbedBuilder()
+                .setTitle('📦 Available Character Packs')
+                .setColor('#FFD700')
+                .setDescription('Choose from our selection of character packs! Each pack contains unique rolls with special guarantees.')
+                .addFields([
+                    {
+                        name: '🥉 Basic Pack - 1,000 Points',
+                        value: '• 10 random character rolls\n• Use: `!pack 1000`',
+                        inline: false
+                    },
+                    {
+                        name: '🥈 Silver Pack - 5,000 Points',
+                        value: '• 10 character rolls\n• 2 guaranteed characters from top 150,000\n• Use: `!pack 5000`',
+                        inline: false
+                    },
+                    {
+                        name: '🥇 Gold Pack - 25,000 Points',
+                        value: '• 10 character rolls\n• 4 guaranteed characters from top 100,000\n• Use: `!pack 25000`',
+                        inline: false
+                    },
+                    {
+                        name: '💎 Diamond Pack - 50,000 Points',
+                        value: '• 10 character rolls\n• 4 guaranteed characters from top 50,000\n• Use: `!pack 50000`',
+                        inline: false
+                    },
+                    {
+                        name: '👑 Legendary Pack - 100,000 Points',
+                        value: '• 6 characters from top 25,000\n• 3 characters from top 2,000\n• 1 character from top 700\n• Use: `!pack 100000`',
+                        inline: false
+                    }
+                ])
+                .setFooter({ text: 'Pack rolls are interactive - click each button to reveal your characters!' })
+                .setTimestamp();
+
+            await message.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error('Error in packs command:', error);
+            await message.reply('❌ Failed to show available packs!');
+        }
+    }
+
     async handlePackCommand(message) {
         try {
-            // Check if user has enough points
-            const user = await this.getUser(message.author.id);
-            const userPoints = user ? user.total_points : 0;
-            const packCost = 1000;
-
-            if (userPoints < packCost) {
-                await message.reply(`❌ You need **${packCost}** points to buy a character pack! You only have **${userPoints}** points.`);
+            const args = message.content.split(' ');
+            if (args.length !== 2) {
+                await message.reply('❌ **Usage:** `!pack <points>`\n**Example:** `!pack 1000`\n\nUse `!packs` to see all available packs!');
                 return;
             }
 
+            const packCost = parseInt(args[1]);
+            const validPacks = [1000, 5000, 25000, 50000, 100000];
+
+            if (!validPacks.includes(packCost)) {
+                await message.reply('❌ Invalid pack! Available packs: `1000`, `5000`, `25000`, `50000`, `100000`\n\nUse `!packs` to see all available packs!');
+                return;
+            }
+
+            // Check if user has enough points
+            const user = await this.getUser(message.author.id);
+            const userPoints = user ? user.total_points : 0;
+
+            if (userPoints < packCost) {
+                await message.reply(`❌ You need **${packCost}** points to buy this pack! You only have **${userPoints}** points.`);
+                return;
+            }
+
+            // Get pack details
+            const packDetails = this.getPackDetails(packCost);
+
             // Create confirmation button
-            const confirmId = `pack_confirm_${message.author.id}_${Date.now()}`;
+            const confirmId = `newpack_confirm_${message.author.id}_${packCost}_${Date.now()}`;
             
             const confirmButton = new ButtonBuilder()
                 .setCustomId(confirmId)
@@ -492,7 +843,7 @@ class WaifuBot {
                 .setStyle(ButtonStyle.Success);
 
             const cancelButton = new ButtonBuilder()
-                .setCustomId(`pack_cancel_${message.author.id}`)
+                .setCustomId(`newpack_cancel_${message.author.id}`)
                 .setLabel('❌ Cancel')
                 .setStyle(ButtonStyle.Secondary);
 
@@ -500,34 +851,632 @@ class WaifuBot {
                 .addComponents(confirmButton, cancelButton);
 
             const embed = new EmbedBuilder()
-                .setTitle('📦 Character Pack Purchase')
-                .setDescription(`Are you sure you want to buy a **Character Pack** for **${packCost}** points?`)
+                .setTitle(`📦 ${packDetails.name} Purchase`)
+                .setDescription(`Are you sure you want to buy a **${packDetails.name}** for **${packCost}** points?`)
                 .addFields([
-                    { name: '📦 Pack Contents', value: '10 character rolls', inline: true },
-                    { name: '🛡️ Special Bonus', value: 'Unsnipeable rolls!', inline: true },
+                    { name: '📦 Pack Contents', value: packDetails.description, inline: false },
                     { name: '💰 Your Points', value: `${userPoints}`, inline: true },
                     { name: '💸 Cost', value: `${packCost} points`, inline: true },
                     { name: '🏦 After Purchase', value: `${userPoints - packCost} points`, inline: true }
                 ])
-                .setColor('#FFD700')
+                .setColor(packDetails.color)
                 .setFooter({ text: 'This confirmation will expire in 30 seconds' })
                 .setTimestamp();
 
             await message.reply({ 
                 embeds: [embed], 
-                components: [row],
-                flags: MessageFlags.Ephemeral // Make the confirmation private
+                components: [row]
             });
-
-            // Set expiration timer for confirmation (simplified)
-            setTimeout(async () => {
-                // The confirmation will just expire naturally after 30 seconds
-                // Discord will disable the buttons automatically
-            }, 30000);
 
         } catch (error) {
             console.error('Error in pack command:', error);
             await message.reply('❌ Failed to process pack purchase request!');
+        }
+    }
+
+    getPackDetails(packCost) {
+        switch (packCost) {
+            case 1000:
+                return {
+                    name: 'Basic Pack',
+                    description: '• 10 random character rolls',
+                    color: '#CD7F32' // Bronze
+                };
+            case 5000:
+                return {
+                    name: 'Silver Pack',
+                    description: '• 10 character rolls\n• 2 guaranteed from top 150,000',
+                    color: '#C0C0C0' // Silver
+                };
+            case 25000:
+                return {
+                    name: 'Gold Pack',
+                    description: '• 10 character rolls\n• 4 guaranteed from top 100,000',
+                    color: '#FFD700' // Gold
+                };
+            case 50000:
+                return {
+                    name: 'Diamond Pack',
+                    description: '• 10 character rolls\n• 4 guaranteed from top 50,000',
+                    color: '#B9F2FF' // Diamond blue
+                };
+            case 100000:
+                return {
+                    name: 'Legendary Pack',
+                    description: '• 6 from top 25,000\n• 3 from top 2,000\n• 1 from top 700',
+                    color: '#FF6B35' // Legendary orange
+                };
+            default:
+                return {
+                    name: 'Unknown Pack',
+                    description: 'Unknown pack type',
+                    color: '#666666'
+                };
+        }
+    }
+
+    async handleNewPackConfirmation(interaction) {
+        try {
+            const customId = interaction.customId;
+            const parts = customId.split('_');
+            
+            if (parts.length < 5) {
+                await interaction.reply({ 
+                    content: '❌ Invalid pack confirmation!', 
+                    ephemeral: true 
+                });
+                return;
+            }
+
+            const authorizedUserId = parts[2];
+            const packCost = parseInt(parts[3]);
+
+            // Check if the person clicking is authorized
+            if (interaction.user.id !== authorizedUserId) {
+                await interaction.reply({ 
+                    content: '❌ Only the person who initiated this pack purchase can confirm it!', 
+                    ephemeral: true 
+                });
+                return;
+            }
+
+            // Get user data and verify they still have enough points
+            const user = await this.getUser(interaction.user.id);
+            const userPoints = user ? user.total_points : 0;
+
+            if (userPoints < packCost) {
+                await interaction.reply({ 
+                    content: `❌ You no longer have enough points! You need **${packCost}** but only have **${userPoints}**.`, 
+                    ephemeral: true 
+                });
+                return;
+            }
+
+            // Deduct the points
+            await this.deductUserPoints(interaction.user.id, interaction.user.username, packCost);
+
+            // Defer the reply to give us more time to process
+            await interaction.deferUpdate();
+
+            // Create pack opening interface
+            await this.createPackOpeningInterface(interaction, packCost);
+
+        } catch (error) {
+            console.error('Error in new pack confirmation:', error);
+            
+            // Try to respond appropriately based on interaction state
+            try {
+                if (!interaction.replied && !interaction.deferred) {
+                    await interaction.reply({ 
+                        content: '❌ Something went wrong while processing your pack purchase!', 
+                        ephemeral: true 
+                    });
+                } else if (interaction.deferred) {
+                    await interaction.editReply({ 
+                        content: '❌ Something went wrong while processing your pack purchase!',
+                        embeds: [],
+                        components: []
+                    });
+                } else {
+                    await interaction.followUp({ 
+                        content: '❌ Something went wrong while processing your pack purchase!', 
+                        ephemeral: true 
+                    });
+                }
+            } catch (replyError) {
+                console.error('Failed to send error message:', replyError);
+            }
+        }
+    }
+
+    async handleNewPackCancel(interaction) {
+        try {
+            const cancelEmbed = new EmbedBuilder()
+                .setTitle('📦 Character Pack Purchase')
+                .setDescription('❌ Purchase cancelled!')
+                .setColor('#FF0000');
+            
+            await interaction.update({ 
+                embeds: [cancelEmbed], 
+                components: [] 
+            });
+        } catch (error) {
+            console.error('Error in pack cancel:', error);
+        }
+    }
+
+    async createPackOpeningInterface(interaction, packCost) {
+        try {
+            console.log(`🎁 Creating pack opening interface for cost: ${packCost}`);
+            const packDetails = this.getPackDetails(packCost);
+            console.log(`📦 Pack details:`, packDetails);
+            
+            // Store pack data for button interactions (without pre-generating characters)
+            const packId = `pack_${interaction.user.id}_${Date.now()}`;
+            this.pendingPacks = this.pendingPacks || new Map();
+            this.pendingPacks.set(packId, {
+                userId: interaction.user.id,
+                characters: new Map(), // Store characters as they're generated
+                packCost: packCost,
+                openedSlots: new Set(),
+                createdAt: Date.now()
+            });
+
+            console.log(`💾 Stored pack data with ID: ${packId}`);
+
+            // Create opening embed
+            const embed = new EmbedBuilder()
+                .setTitle(`📦 ${packDetails.name} - Opening`)
+                .setDescription('Click each button to reveal your characters!')
+                .setColor(packDetails.color)
+                .addFields([
+                    { name: '💰 Cost', value: `${packCost} points`, inline: true },
+                    { name: '📦 Characters', value: '10 characters', inline: true },
+                    { name: '✨ Status', value: 'Ready to open!', inline: true }
+                ])
+                .setFooter({ text: 'Click buttons 1-10 to reveal your characters! • Today at ' + new Date().toLocaleTimeString() })
+                .setTimestamp();
+
+            // Create 10 buttons (5 per row)
+            const row1 = new ActionRowBuilder();
+            const row2 = new ActionRowBuilder();
+
+            for (let i = 1; i <= 10; i++) {
+                const button = new ButtonBuilder()
+                    .setCustomId(`packroll_${packId}_${i}`)
+                    .setLabel(`${i}`)
+                    .setStyle(ButtonStyle.Secondary)
+                    .setEmoji('📦');
+
+                if (i <= 5) {
+                    row1.addComponents(button);
+                } else {
+                    row2.addComponents(button);
+                }
+            }
+
+            console.log(`🔄 Updating interaction with pack interface...`);
+            await interaction.editReply({ 
+                embeds: [embed], 
+                components: [row1, row2] 
+            });
+            console.log(`✅ Pack interface created successfully`);
+
+            // Set expiration timer
+            setTimeout(() => {
+                if (this.pendingPacks && this.pendingPacks.has(packId)) {
+                    this.pendingPacks.delete(packId);
+                }
+            }, 300000); // 5 minutes
+
+        } catch (error) {
+            console.error('Error creating pack opening interface:', error);
+        }
+    }
+
+    async generatePackCharacters(packCost) {
+        const characters = [];
+        
+        try {
+            console.log(`Generating pack for cost: ${packCost}`);
+            
+            switch (packCost) {
+                case 1000: // Basic Pack - 10 random
+                    console.log('Generating Basic Pack - 10 random characters');
+                    for (let i = 0; i < 10; i++) {
+                        const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                        const character = await this.getCharacter(randomId);
+                        if (character) characters.push(character);
+                    }
+                    break;
+
+                case 5000: // Silver Pack - 8 random + 2 from top pool
+                    console.log('Generating Silver Pack - 8 random + 2 top characters');
+                    // 8 random characters
+                    for (let i = 0; i < 8; i++) {
+                        const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                        const character = await this.getCharacter(randomId);
+                        if (character) characters.push(character);
+                    }
+                    // Get 2 characters from top pool (pages 50-200)
+                    const silverTopPool = await this.getTopCharacterPool([50, 100, 150, 200]);
+                    const silverSelected = this.selectRandomFromPool(silverTopPool, 2);
+                    characters.push(...silverSelected);
+                    break;
+
+                case 25000: // Gold Pack - 6 random + 4 from better top pool
+                    console.log('Generating Gold Pack - 6 random + 4 top characters');
+                    // 6 random characters
+                    for (let i = 0; i < 6; i++) {
+                        const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                        const character = await this.getCharacter(randomId);
+                        if (character) characters.push(character);
+                    }
+                    // Get 4 characters from better top pool (pages 25-100)
+                    const goldTopPool = await this.getTopCharacterPool([25, 50, 75, 100]);
+                    const goldSelected = this.selectRandomFromPool(goldTopPool, 4);
+                    characters.push(...goldSelected);
+                    break;
+
+                case 50000: // Diamond Pack - 6 random + 4 from high tier top pool
+                    console.log('Generating Diamond Pack - 6 random + 4 high tier characters');
+                    // 6 random characters
+                    for (let i = 0; i < 6; i++) {
+                        const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                        const character = await this.getCharacter(randomId);
+                        if (character) characters.push(character);
+                    }
+                    // Get 4 characters from high tier pool (pages 10-50)
+                    const diamondTopPool = await this.getTopCharacterPool([10, 20, 30, 40, 50]);
+                    const diamondSelected = this.selectRandomFromPool(diamondTopPool, 4);
+                    characters.push(...diamondSelected);
+                    break;
+
+                case 100000: // Legendary Pack - 5 characters from top rankings + 5 random
+                    console.log('Generating Legendary Pack - 5 top characters + 5 random');
+                    
+                    // Get 2 characters from top 700 (rank 1-700)
+                    console.log('Getting 2 characters from top 700...');
+                    for (let i = 0; i < 2; i++) {
+                        const rank = Math.floor(Math.random() * 700) + 1; // Random rank 1-700
+                        const page = Math.ceil(rank / 25); // 25 characters per page
+                        const positionInPage = ((rank - 1) % 25); // Position within that page
+                        
+                        const topChars = await this.getTopCharacters(page);
+                        if (topChars && topChars[positionInPage]) {
+                            const topChar = topChars[positionInPage];
+                            const character = await this.convertJikanCharacter(topChar);
+                            if (character) {
+                                console.log(`Top 700: Rank ${rank} - ${character.name} (${character.favorites} favorites)`);
+                                characters.push(character);
+                            }
+                        }
+                    }
+                    
+                    // Get 3 characters from top 1000 (rank 1-1000)
+                    console.log('Getting 3 characters from top 1000...');
+                    for (let i = 0; i < 3; i++) {
+                        const rank = Math.floor(Math.random() * 1000) + 1; // Random rank 1-1000
+                        const page = Math.ceil(rank / 25); // 25 characters per page
+                        const positionInPage = ((rank - 1) % 25); // Position within that page
+                        
+                        const topChars = await this.getTopCharacters(page);
+                        if (topChars && topChars[positionInPage]) {
+                            const topChar = topChars[positionInPage];
+                            const character = await this.convertJikanCharacter(topChar);
+                            if (character) {
+                                console.log(`Top 1000: Rank ${rank} - ${character.name} (${character.favorites} favorites)`);
+                                characters.push(character);
+                            }
+                        }
+                    }
+                    
+                    // Fill remaining slots with random characters (5 total, we have 5 already)
+                    console.log('Adding 5 random characters...');
+                    for (let i = 0; i < 5; i++) {
+                        const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                        const character = await this.getCharacter(randomId);
+                        if (character) {
+                            console.log(`Random: ${character.name} (${character.favorites} favorites)`);
+                            characters.push(character);
+                        }
+                    }
+                    
+                    console.log(`Legendary pack generated: ${characters.length} characters total`);
+                    break;
+            }
+
+            // Fill remaining slots if needed (should rarely happen)
+            while (characters.length < 10) {
+                console.log(`Filling remaining slot (${characters.length}/10)`);
+                const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                const character = await this.getCharacter(randomId);
+                if (character) {
+                    characters.push(character);
+                }
+            }
+
+            // Shuffle the characters to randomize order
+            for (let i = characters.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [characters[i], characters[j]] = [characters[j], characters[i]];
+            }
+
+            console.log(`Pack generation complete: ${characters.length} characters`);
+
+        } catch (error) {
+            console.error('Error generating pack characters:', error);
+        }
+
+        return characters;
+    }
+
+    async convertJikanCharacter(jikanChar) {
+        try {
+            // If we have a mal_id, try to get the full character data from our API
+            if (jikanChar.mal_id) {
+                const fullCharacter = await this.getCharacter(jikanChar.mal_id);
+                if (fullCharacter) {
+                    return fullCharacter;
+                }
+            }
+            
+            // Fallback: create a character object from Jikan data
+            // This ensures compatibility with our existing character structure
+            const character = {
+                character_id: jikanChar.mal_id,
+                mal_id: jikanChar.mal_id,
+                name: jikanChar.name,
+                name_kanji: jikanChar.name_kanji || null,
+                nicknames: jikanChar.nicknames || [],
+                favorites: jikanChar.favorites || 0,
+                about: jikanChar.about || null,
+                images: jikanChar.images || null,
+                anime: jikanChar.anime || []
+            };
+            
+            console.log(`Converted Jikan character: ${character.name} with ${character.favorites} favorites`);
+            return character;
+        } catch (error) {
+            console.error('Error converting Jikan character:', error);
+            return null;
+        }
+    }
+
+    async handlePackRollButton(interaction) {
+        try {
+            const parts = interaction.customId.split('_');
+            if (parts.length < 3) {
+                await interaction.reply({ 
+                    content: '❌ Invalid pack roll button!', 
+                    flags: 64
+                });
+                return;
+            }
+
+            const packId = `${parts[1]}_${parts[2]}_${parts[3]}`;
+            const slotNumber = parseInt(parts[4]);
+
+            const packData = this.pendingPacks?.get(packId);
+
+            if (!packData) {
+                await interaction.reply({ 
+                    content: '❌ This pack has expired!', 
+                    flags: 64
+                });
+                return;
+            }
+
+            if (interaction.user.id !== packData.userId) {
+                await interaction.reply({ 
+                    content: '❌ Only the pack owner can open slots!', 
+                    flags: 64
+                });
+                return;
+            }
+
+            if (packData.openedSlots.has(slotNumber)) {
+                await interaction.reply({ 
+                    content: '❌ This slot has already been opened!', 
+                    flags: 64
+                });
+                return;
+            }
+
+            // Defer the reply to prevent timeout while fetching character data
+            await interaction.deferReply(); // Everyone can see the pack opening
+
+            // Mark slot as opened
+            packData.openedSlots.add(slotNumber);
+
+            // Generate character for this slot if not already generated
+            let character;
+            if (packData.characters.has(slotNumber)) {
+                character = packData.characters.get(slotNumber);
+            } else {
+                // Generate characters using the pack generation system
+                console.log(`Generating character for slot ${slotNumber} in pack cost ${packData.packCost}`);
+                
+                // Check if we need to generate all characters for this pack type
+                if (packData.packCost === 100000) {
+                    // For legendary packs, we need to generate all characters at once to ensure proper distribution
+                    if (packData.characters.size === 0) {
+                        console.log('Generating all legendary pack characters...');
+                        const allCharacters = await this.generatePackCharacters(packData.packCost);
+                        
+                        // Store all generated characters
+                        for (let i = 0; i < allCharacters.length && i < 10; i++) {
+                            packData.characters.set(i + 1, allCharacters[i]);
+                        }
+                    }
+                    character = packData.characters.get(slotNumber);
+                } else {
+                    // For other pack types, generate individual characters
+                    const singleCharacterPack = await this.generatePackCharacters(packData.packCost);
+                    character = singleCharacterPack[0]; // Take the first character
+                    packData.characters.set(slotNumber, character);
+                }
+                
+                if (!character) {
+                    console.log('Pack generation failed, falling back to random character');
+                    // Fallback to random character if pack generation fails
+                    let attempts = 0;
+                    while (!character && attempts < 10) {
+                        const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                        character = await this.getCharacter(randomId);
+                        attempts++;
+                    }
+                    if (character) {
+                        packData.characters.set(slotNumber, character);
+                    }
+                }
+            }
+
+            // Get anime info and check ownership
+            const animeInfo = await this.getCharacterAnime(character.mal_id);
+            const userId = await this.getUserId(interaction.user.id, interaction.user.username);
+            
+            // Check if character is already owned globally
+            const globalOwnership = await this.checkGlobalCharacterOwnership(character.mal_id);
+            
+            let points = this.calculatePoints(character.favorites || 0, animeInfo, false);
+            let isDuplicate = false;
+            let claimed = false;
+
+            if (globalOwnership) {
+                // Give 150 points for duplicate
+                points = 150;
+                isDuplicate = true;
+                await this.addUserPoints(interaction.user.id, interaction.user.username, points);
+                await this.recordRoll(userId, character.mal_id, character, points, isDuplicate);
+            } else {
+                // Try to claim the character
+                claimed = await this.claimCharacter(userId, character.mal_id, character, animeInfo);
+                
+                if (claimed) {
+                    await this.addUserPoints(interaction.user.id, interaction.user.username, points);
+                    await this.recordRoll(userId, character.mal_id, character, points, false);
+                } else {
+                    // Someone else claimed it first
+                    points = 150;
+                    isDuplicate = true;
+                    await this.addUserPoints(interaction.user.id, interaction.user.username, points);
+                    await this.recordRoll(userId, character.mal_id, character, points, true);
+                }
+            }
+
+            // Create character reveal embed
+            const embed = new EmbedBuilder()
+                .setTitle(`📦 Slot ${slotNumber} - ${character.name || 'Unknown Character'}`)
+                .setColor(isDuplicate ? 0xFFD700 : (points >= 500 ? 0xFF69B4 : 0x00AE86))
+                .setThumbnail(character.images?.jpg?.image_url || character.image_url)
+                .addFields([
+                    { name: '❤️ Favorites', value: (character.favorites || 0).toString(), inline: true },
+                    { name: '🏆 Points Earned', value: points.toString(), inline: true },
+                    { name: '✨ Status', value: isDuplicate ? 'Duplicate (+150 pts)' : 'New Character!', inline: true }
+                ])
+                .setFooter({ text: `Opened by ${interaction.user.username}` })
+                .setTimestamp();
+
+            // Add anime information if available
+            if (animeInfo) {
+                embed.addFields({ 
+                    name: '📺 Anime', 
+                    value: animeInfo.title || 'Unknown Anime', 
+                    inline: true 
+                });
+                
+                if (animeInfo.role) {
+                    embed.addFields({ 
+                        name: '🎭 Role', 
+                        value: animeInfo.role, 
+                        inline: true 
+                    });
+                }
+            }
+
+            if (character.about) {
+                const truncatedAbout = character.about.length > 200 
+                    ? character.about.substring(0, 200) + '...' 
+                    : character.about;
+                embed.addFields({ 
+                    name: '📋 About', 
+                    value: truncatedAbout, 
+                    inline: false 
+                });
+            }
+
+            await interaction.followUp({ 
+                embeds: [embed]
+            });
+
+            // Update the original message to show opened slot
+            await this.updatePackInterface(interaction, packId, packData);
+
+        } catch (error) {
+            console.error('Error in pack roll button:', error);
+            if (!interaction.replied && !interaction.deferred) {
+                await interaction.reply({ 
+                    content: '❌ Something went wrong while opening the slot!', 
+                    flags: 64
+                });
+            } else if (interaction.deferred) {
+                await interaction.followUp({ 
+                    content: '❌ Something went wrong while opening the slot!', 
+                    flags: 64
+                });
+            }
+        }
+    }
+
+    async updatePackInterface(interaction, packId, packData) {
+        try {
+            const packDetails = this.getPackDetails(packData.packCost);
+            const openedCount = packData.openedSlots.size;
+            
+            const embed = new EmbedBuilder()
+                .setTitle(`📦 ${packDetails.name} - Opening`)
+                .setDescription('Click each button to reveal your characters!')
+                .setColor(packDetails.color)
+                .addFields([
+                    { name: '💰 Cost', value: `${packData.packCost} points`, inline: true },
+                    { name: '📦 Progress', value: `${openedCount}/10 opened`, inline: true },
+                    { name: '✨ Status', value: openedCount === 10 ? 'Complete!' : 'Opening...', inline: true }
+                ])
+                .setFooter({ text: 'Click buttons 1-10 to reveal your characters!' })
+                .setTimestamp();
+
+            // Recreate buttons with opened ones disabled
+            const row1 = new ActionRowBuilder();
+            const row2 = new ActionRowBuilder();
+
+            for (let i = 1; i <= 10; i++) {
+                const isOpened = packData.openedSlots.has(i);
+                const button = new ButtonBuilder()
+                    .setCustomId(`packroll_${packId}_${i}`)
+                    .setLabel(`${i}`)
+                    .setStyle(isOpened ? ButtonStyle.Success : ButtonStyle.Secondary)
+                    .setEmoji(isOpened ? '✅' : '📦')
+                    .setDisabled(isOpened);
+
+                if (i <= 5) {
+                    row1.addComponents(button);
+                } else {
+                    row2.addComponents(button);
+                }
+            }
+
+            // Get the original message and update it
+            const originalMessage = interaction.message;
+            if (originalMessage) {
+                await originalMessage.edit({ 
+                    embeds: [embed], 
+                    components: openedCount === 10 ? [] : [row1, row2]
+                });
+            }
+
+        } catch (error) {
+            console.error('Error updating pack interface:', error);
         }
     }
 
@@ -678,6 +1627,30 @@ class WaifuBot {
         }
     }
 
+    async getTopCharacters(page = 1) {
+        try {
+            const cacheKey = `top_characters:${page}`;
+            
+            // Try to get from cache first
+            const cached = await this.redis.get(cacheKey);
+            if (cached) {
+                return JSON.parse(cached);
+            }
+
+            // Fetch from API
+            const response = await axios.get(`${process.env.JIKAN_BASE_URL}/top/characters?page=${page}`);
+            const characters = response.data.data;
+
+            // Cache the result for 1 hour (top characters don't change frequently)
+            await this.redis.setEx(cacheKey, 3600, JSON.stringify(characters));
+            
+            return characters;
+        } catch (error) {
+            console.error(`Error fetching top characters page ${page}:`, error.message);
+            return null;
+        }
+    }
+
     calculatePoints(favorites, animeInfo, isLuckyRoll = false) {
         // Base point system based on favorites
         let basePoints;
@@ -726,7 +1699,7 @@ class WaifuBot {
             } else {
                 progressText = `🍀 Lucky in ${luckyProgress.rollsUntilLucky} rolls`;
             }
-            embed.addFields({ name: '� Lucky Progress', value: progressText, inline: true });
+            embed.addFields({ name: '  Lucky Progress', value: progressText, inline: true });
         }
 
         // Add special lucky roll indicator
@@ -800,7 +1773,7 @@ class WaifuBot {
             } else {
                 progressText = `🍀 Lucky in ${luckyProgress.rollsUntilLucky} rolls`;
             }
-            embed.addFields({ name: '� Lucky Progress', value: progressText, inline: true });
+            embed.addFields({ name: '  Lucky Progress', value: progressText, inline: true });
         }
 
         // Add special lucky roll indicator
@@ -1038,16 +2011,23 @@ class WaifuBot {
         return result.rows.length > 0;
     }
 
+    async checkGlobalCharacterOwnership(characterId) {
+        const query = 'SELECT user_id FROM user_characters WHERE character_id = $1';
+        const result = await this.db.query(query, [characterId]);
+        return result.rows.length > 0 ? result.rows[0] : null;
+    }
+
     async claimCharacter(userId, characterId, character, animeInfo) {
         const query = `
             INSERT INTO user_characters (
                 user_id, character_id, character_name, character_image_url, 
                 anime_title, character_role, character_favorites
             ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (user_id, character_id) DO NOTHING
+            ON CONFLICT (character_id) DO NOTHING
+            RETURNING id
         `;
         
-        await this.db.query(query, [
+        const result = await this.db.query(query, [
             userId,
             characterId,
             character.name || 'Unknown Character',
@@ -1056,6 +2036,9 @@ class WaifuBot {
             animeInfo?.role || null,
             character.favorites || 0
         ]);
+        
+        // Return true if character was successfully claimed, false if it was already taken
+        return result.rows.length > 0;
     }
 
     async recordRoll(userId, characterId, character, points, isDuplicate) {
@@ -1114,36 +2097,71 @@ class WaifuBot {
             }
 
             // Process the claim
-            await this.claimCharacter(
+            const claimSuccessful = await this.claimCharacter(
                 claimData.userId, 
                 claimData.characterId, 
                 claimData.character, 
                 claimData.animeInfo
             );
 
-            await this.addUserPoints(interaction.user.id, interaction.user.username, claimData.points);
-            await this.recordRoll(
-                claimData.userId, 
-                claimData.characterId, 
-                claimData.character, 
-                claimData.points, 
-                false
-            );
+            if (!claimSuccessful) {
+                // Character was already claimed by someone else
+                const duplicatePoints = 150;
+                await this.addUserPoints(interaction.user.id, interaction.user.username, duplicatePoints);
+                await this.recordRoll(
+                    claimData.userId, 
+                    claimData.characterId, 
+                    claimData.character, 
+                    duplicatePoints, 
+                    true
+                );
 
-            // Update the message with success
-            const successEmbed = this.createCharacterEmbed(
-                claimData.character, 
-                claimData.points, 
-                interaction.user, 
-                claimData.animeInfo, 
-                false,
-                claimData.rollsLeft
-            );
+                // Create duplicate embed
+                const duplicateEmbed = new EmbedBuilder()
+                    .setTitle(claimData.character.name || 'Unknown Character')
+                    .setColor(0xFFD700) // Gold for duplicates
+                    .setThumbnail(claimData.character.images?.jpg?.image_url || claimData.character.image_url)
+                    .addFields(
+                        { name: '❤️ Favorites', value: (claimData.character.favorites || 0).toString(), inline: true },
+                        { name: '🏆 Points Earned', value: duplicatePoints.toString(), inline: true }
+                    )
+                    .setDescription('❌ **Character Already Claimed!**\nSomeone else claimed this character first. You received 150 points instead.')
+                    .setFooter({ 
+                        text: `Claimed by ${interaction.user.username} • Duplicate!`, 
+                        iconURL: interaction.user.displayAvatarURL() 
+                    })
+                    .setTimestamp();
 
-            await interaction.update({ 
-                embeds: [successEmbed], 
-                components: [] 
-            });
+                await interaction.update({ 
+                    embeds: [duplicateEmbed], 
+                    components: [] 
+                });
+            } else {
+                // Character successfully claimed
+                await this.addUserPoints(interaction.user.id, interaction.user.username, claimData.points);
+                await this.recordRoll(
+                    claimData.userId, 
+                    claimData.characterId, 
+                    claimData.character, 
+                    claimData.points, 
+                    false
+                );
+
+                // Update the message with success
+                const successEmbed = this.createCharacterEmbed(
+                    claimData.character, 
+                    claimData.points, 
+                    interaction.user, 
+                    claimData.animeInfo, 
+                    false,
+                    claimData.rollsLeft
+                );
+
+                await interaction.update({ 
+                    embeds: [successEmbed], 
+                    components: [] 
+                });
+            }
 
             // Remove from pending claims (remove both claim and snipe IDs)
             const snipeId = claimId.replace('claim_', 'snipe_');
@@ -1239,39 +2257,57 @@ class WaifuBot {
 
             // Give the character to the sniper instead
             const sniperUserId = await this.getUserId(interaction.user.id, interaction.user.username);
-            await this.claimCharacter(
+            const snipeSuccessful = await this.claimCharacter(
                 sniperUserId, 
                 claimData.characterId, 
                 claimData.character, 
                 claimData.animeInfo
             );
 
-            // Record the roll for the sniper (no points gained from snipe, only character)
-            await this.recordRoll(
-                sniperUserId, 
-                claimData.characterId, 
-                claimData.character, 
-                0, // No points awarded for sniping
-                false
-            );
+            if (!snipeSuccessful) {
+                // Character was already claimed by someone else, refund points
+                await this.addUserPoints(interaction.user.id, interaction.user.username, snipeCost);
+                
+                // Create failure embed
+                const failureEmbed = new EmbedBuilder()
+                    .setColor('#FF0000')
+                    .setTitle('❌ Snipe Failed!')
+                    .setDescription(`**${claimData.character.name}** was already claimed by someone else!\nYour ${snipeCost} points have been refunded.`)
+                    .setThumbnail(claimData.character.images?.jpg?.image_url || null)
+                    .setTimestamp();
 
-            // Create success embed showing the snipe
-            const successEmbed = new EmbedBuilder()
-                .setColor('#FF0000')
-                .setTitle('🥷 Character Sniped!')
-                .setDescription(`**${interaction.user.username}** sniped **${claimData.character.name}** for **${snipeCost}** points!`)
-                .setThumbnail(claimData.character.images?.jpg?.image_url || null)
-                .addFields([
-                    { name: 'Original Roller', value: `<@${claimData.rollerId}>`, inline: true },
-                    { name: 'Sniper', value: `<@${interaction.user.id}>`, inline: true },
-                    { name: 'Cost', value: `${snipeCost} points`, inline: true }
-                ])
-                .setTimestamp();
+                await interaction.update({ 
+                    embeds: [failureEmbed], 
+                    components: [] 
+                });
+            } else {
+                // Record the roll for the sniper (no points gained from snipe, only character)
+                await this.recordRoll(
+                    sniperUserId, 
+                    claimData.characterId, 
+                    claimData.character, 
+                    0, // No points awarded for sniping
+                    false
+                );
 
-            await interaction.update({ 
-                embeds: [successEmbed], 
-                components: [] 
-            });
+                // Create success embed showing the snipe
+                const successEmbed = new EmbedBuilder()
+                    .setColor('#FF0000')
+                    .setTitle('🥷 Character Sniped!')
+                    .setDescription(`**${interaction.user.username}** sniped **${claimData.character.name}** for **${snipeCost}** points!`)
+                    .setThumbnail(claimData.character.images?.jpg?.image_url || null)
+                    .addFields([
+                        { name: 'Original Roller', value: `<@${claimData.rollerId}>`, inline: true },
+                        { name: 'Sniper', value: `<@${interaction.user.id}>`, inline: true },
+                        { name: 'Cost', value: `${snipeCost} points`, inline: true }
+                    ])
+                    .setTimestamp();
+
+                await interaction.update({ 
+                    embeds: [successEmbed], 
+                    components: [] 
+                });
+            }
 
             // Set snipe cooldown (1 min for normal, 10 min for main characters)
             const isMainCharacter = claimData.animeInfo && claimData.animeInfo.role && 
@@ -1560,7 +2596,7 @@ class WaifuBot {
                 { name: '🏆 Total Points Earned', value: `${totalPoints}`, inline: true },
                 { name: '⭐ Duplicates', value: `${duplicateCount}`, inline: true },
                 { name: '🎁 Bonus Characters', value: `${bonusCount}`, inline: true },
-                { name: '� Pack Value', value: `${totalPoints} pts (cost: 1000)`, inline: false }
+                { name: '  Pack Value', value: `${totalPoints} pts (cost: 1000)`, inline: false }
             ]);
 
             // Final update
@@ -1885,9 +2921,14 @@ class WaifuBot {
                         inline: false 
                     },
                     { 
-                        name: '📦 !pack', 
-                        value: 'Buy a character pack for 1000 points\n• Get 10 instant character rolls\n• All characters are auto-claimed\n• Unsnipeable rolls!', 
+                        name: '📦 !pack <points>', 
+                        value: 'Buy character packs with guaranteed rarities\n• Basic (1000): 10 random characters\n• Silver (5000): 10 chars, 2 from top 150k\n• Gold (25000): 10 chars, 4 from top 100k\n• Diamond (50000): 10 chars, 4 from top 50k\n• Legendary (100000): 6 from top 25k, 3 from top 2k, 1 from top 700', 
                         inline: false 
+                    },
+                    { 
+                        name: '📋 !packs', 
+                        value: 'View all available character packs with detailed information', 
+                        inline: true 
                     },
                     { 
                         name: '🎁 !give @user character', 
@@ -1895,12 +2936,12 @@ class WaifuBot {
                         inline: false 
                     },
                     { 
-                        name: '� !lucky', 
+                        name: '  !lucky', 
                         value: 'Check your lucky roll progress\n• Every 10th roll guarantees 50+ points\n• Lucky rolls have pink color', 
                         inline: true 
                     },
                     { 
-                        name: '�🎯 Point System', 
+                        name: ' 🎯 Point System', 
                         value: '• Base points based on character popularity\n• +500 for Main characters\n• +150 for duplicate characters\n• Use points to snipe claims (3x favorites cost)\n• Lucky rolls every 10th roll (50+ points guaranteed)', 
                         inline: false 
                     }
@@ -1992,7 +3033,7 @@ class WaifuBot {
                     // Update the existing trade embed
                     const channel = await this.client.channels.fetch(existingTrade.channelId);
                     const tradeMessage = await channel.messages.fetch(existingTrade.messageId);
-                    await this.updateExistingTradeEmbed(tradeMessage, existingTrade);
+                    await this.updateExistingTradeEmbed(tradeMessage, existingTrade, existingTradeId);
                     
                     await message.reply(`✅ Added **${matchingCharacter.character_name}** to the trade with ${targetUser.username}!`);
                     return;
@@ -2014,6 +3055,7 @@ class WaifuBot {
     async createNewTrade(message, targetUser, offeredCharacter) {
         // Create trade ID
         const tradeId = `trade_${message.author.id}_${targetUser.id}_${Date.now()}`;
+        console.log(`🆕 Creating new trade: ${tradeId}`);
 
         // Create trade embed
         const embed = new EmbedBuilder()
@@ -2042,13 +3084,13 @@ class WaifuBot {
             .setTimestamp();
 
         const confirmButton = new ButtonBuilder()
-            .setCustomId(`${tradeId}_confirm_initiator`)
+            .setCustomId(`trade_confirm_init_${tradeId}`)
             .setLabel('✅ Confirm Trade')
             .setStyle(ButtonStyle.Success)
             .setDisabled(true); // Disabled until both characters are selected
 
         const cancelButton = new ButtonBuilder()
-            .setCustomId(`${tradeId}_cancel`)
+            .setCustomId(`trade_cancel_${tradeId}`)
             .setLabel('❌ Cancel Trade')
             .setStyle(ButtonStyle.Danger);
 
@@ -2071,20 +3113,24 @@ class WaifuBot {
             status: 'waiting_for_target',
             initiatorConfirmed: false,
             targetConfirmed: false,
-            createdAt: Date.now()
+            createdAt: Date.now(),
+            timeoutId: null
         });
 
-        // Set expiration timer
-        setTimeout(async () => {
+        // Set expiration timer and store its ID
+        const timeoutId = setTimeout(async () => {
             if (this.pendingTrades.has(tradeId)) {
                 await this.expireTrade(tradeId, reply, 'Trade request timed out');
             }
         }, 600000); // 10 minutes
 
+        // Store the timeout ID so we can clear it later
+        this.pendingTrades.get(tradeId).timeoutId = timeoutId;
+
         await message.reply(`✅ Trade request sent to ${targetUser.username} with **${offeredCharacter.character_name}**!`);
     }
 
-    async updateExistingTradeEmbed(message, tradeData) {
+    async updateExistingTradeEmbed(message, tradeData, tradeId) {
         try {
             const initiatorUser = await this.client.users.fetch(tradeData.initiatorId);
             const targetUser = await this.client.users.fetch(tradeData.targetId);
@@ -2100,7 +3146,7 @@ class WaifuBot {
                         inline: true
                     },
                     {
-                        name: `� ${targetUser.username} offers:`,
+                        name: `  ${targetUser.username} offers:`,
                         value: `**${tradeData.targetSelection.character_name}**\n${tradeData.targetSelection.anime_title || 'Unknown Anime'}${tradeData.targetSelection.character_favorites > 0 ? `\n❤️ ${tradeData.targetSelection.character_favorites} favorites` : ''}`,
                         inline: true
                     },
@@ -2115,19 +3161,19 @@ class WaifuBot {
 
             // Create new buttons with both enabled
             const initiatorConfirmButton = new ButtonBuilder()
-                .setCustomId(`${Object.keys(this.pendingTrades).find(id => this.pendingTrades.get(id) === tradeData)}_confirm_initiator`)
+                .setCustomId(`trade_confirm_init_${tradeId}`)
                 .setLabel(`✅ ${initiatorUser.username} Confirm`)
                 .setStyle(ButtonStyle.Success)
                 .setDisabled(false);
 
             const targetConfirmButton = new ButtonBuilder()
-                .setCustomId(`${Object.keys(this.pendingTrades).find(id => this.pendingTrades.get(id) === tradeData)}_confirm_target`)
+                .setCustomId(`trade_confirm_target_${tradeId}`)
                 .setLabel(`✅ ${targetUser.username} Confirm`)
                 .setStyle(ButtonStyle.Success)
                 .setDisabled(false);
 
             const cancelButton = new ButtonBuilder()
-                .setCustomId(`${Object.keys(this.pendingTrades).find(id => this.pendingTrades.get(id) === tradeData)}_cancel`)
+                .setCustomId(`trade_cancel_${tradeId}`)
                 .setLabel('❌ Cancel Trade')
                 .setStyle(ButtonStyle.Danger);
 
@@ -2176,8 +3222,24 @@ class WaifuBot {
 
     async handleTradeButton(interaction) {
         try {
-            const parts = interaction.customId.split('_');
-            if (parts.length < 4) {
+            const customId = interaction.customId;
+            
+            // Parse the custom ID
+            let tradeId, action, userType;
+            
+            if (customId.startsWith('trade_confirm_init_')) {
+                tradeId = customId.replace('trade_confirm_init_', '');
+                action = 'confirm';
+                userType = 'initiator';
+            } else if (customId.startsWith('trade_confirm_target_')) {
+                tradeId = customId.replace('trade_confirm_target_', '');
+                action = 'confirm';
+                userType = 'target';
+            } else if (customId.startsWith('trade_cancel_')) {
+                tradeId = customId.replace('trade_cancel_', '');
+                action = 'cancel';
+                userType = null;
+            } else {
                 await interaction.reply({ 
                     content: '❌ Invalid trade button!', 
                     ephemeral: true 
@@ -2185,13 +3247,11 @@ class WaifuBot {
                 return;
             }
 
-            const tradeId = `${parts[1]}_${parts[2]}_${parts[3]}`;
-            const action = parts[4]; // 'confirm' or 'cancel'
-            const userType = parts[5]; // 'initiator' or 'target'
-
             const tradeData = this.pendingTrades.get(tradeId);
 
             if (!tradeData) {
+                console.log(`❌ Trade not found: ${tradeId}`);
+                console.log(`📊 Available trades: ${Array.from(this.pendingTrades.keys()).join(', ')}`);
                 await interaction.reply({ 
                     content: '❌ This trade has expired or been completed!', 
                     ephemeral: true 
@@ -2259,10 +3319,11 @@ class WaifuBot {
 
                 // Check if both have confirmed
                 if (tradeData.initiatorConfirmed && tradeData.targetConfirmed) {
+                    console.log(`✅ Both users confirmed trade ${tradeId}, completing...`);
                     // Small delay to let users see the confirmation status
                     setTimeout(async () => {
                         await this.completeTrade(tradeId, interaction.message);
-                    }, 2000);
+                    }, 1000); // Reduced from 2000ms to 1000ms
                 }
             }
 
@@ -2311,19 +3372,19 @@ class WaifuBot {
 
             // Create updated buttons
             const initiatorConfirmButton = new ButtonBuilder()
-                .setCustomId(`${tradeId}_confirm_initiator`)
+                .setCustomId(`trade_confirm_init_${tradeId}`)
                 .setLabel(`${tradeData.initiatorConfirmed ? '✅' : '⏳'} ${initiatorUser.username}`)
                 .setStyle(tradeData.initiatorConfirmed ? ButtonStyle.Success : ButtonStyle.Secondary)
                 .setDisabled(tradeData.initiatorConfirmed);
 
             const targetConfirmButton = new ButtonBuilder()
-                .setCustomId(`${tradeId}_confirm_target`)
+                .setCustomId(`trade_confirm_target_${tradeId}`)
                 .setLabel(`${tradeData.targetConfirmed ? '✅' : '⏳'} ${targetUser.username}`)
                 .setStyle(tradeData.targetConfirmed ? ButtonStyle.Success : ButtonStyle.Secondary)
                 .setDisabled(tradeData.targetConfirmed);
 
             const cancelButton = new ButtonBuilder()
-                .setCustomId(`${tradeId}_cancel`)
+                .setCustomId(`trade_cancel_${tradeId}`)
                 .setLabel('❌ Cancel Trade')
                 .setStyle(ButtonStyle.Danger)
                 .setDisabled(tradeData.initiatorConfirmed && tradeData.targetConfirmed);
@@ -2343,9 +3404,19 @@ class WaifuBot {
         try {
             const tradeData = this.pendingTrades.get(tradeId);
 
+            if (!tradeData) {
+                console.log(`❌ Trade ${tradeId} not found when trying to complete`);
+                return;
+            }
+
             // Clear auto-complete timer if it exists
             if (tradeData.autoCompleteTimer) {
                 clearTimeout(tradeData.autoCompleteTimer);
+            }
+
+            // Clear the expiration timeout
+            if (tradeData.timeoutId) {
+                clearTimeout(tradeData.timeoutId);
             }
 
             // Perform the database trade
@@ -2433,6 +3504,11 @@ class WaifuBot {
                 clearTimeout(tradeData.autoCompleteTimer);
             }
 
+            // Clear the expiration timeout
+            if (tradeData && tradeData.timeoutId) {
+                clearTimeout(tradeData.timeoutId);
+            }
+
             const embed = new EmbedBuilder()
                 .setTitle('❌ Trade Cancelled')
                 .setColor(0xFF0000)
@@ -2486,107 +3562,58 @@ class WaifuBot {
             const initiatorResult = await client.query(initiatorQuery, [initiatorDiscordId]);
             const targetResult = await client.query(targetQuery, [targetDiscordId]);
 
+            if (initiatorResult.rows.length === 0 || targetResult.rows.length === 0) {
+                throw new Error('One or both users not found in database');
+            }
+
             const initiatorUserId = initiatorResult.rows[0].id;
             const targetUserId = targetResult.rows[0].id;
             
             console.log(`👥 User IDs: Initiator=${initiatorUserId}, Target=${targetUserId}`);
 
-            // Get complete character information before deleting
-            console.log(`📊 Fetching character information...`);
-            const offeredCharQuery = `
-                SELECT character_name, character_image_url, anime_title, character_role, character_favorites
-                FROM user_characters 
-                WHERE user_id = $1 AND character_id = $2
-            `;
-            const requestedCharQuery = `
-                SELECT character_name, character_image_url, anime_title, character_role, character_favorites
-                FROM user_characters 
-                WHERE user_id = $1 AND character_id = $2
-            `;
+            // Verify both users currently own their respective characters
+            const offeredCharCheck = await client.query(
+                'SELECT * FROM user_characters WHERE character_id = $1 AND user_id = $2',
+                [offeredCharacterId, initiatorUserId]
+            );
             
-            const offeredCharResult = await client.query(offeredCharQuery, [initiatorUserId, offeredCharacterId]);
-            const requestedCharResult = await client.query(requestedCharQuery, [targetUserId, requestedCharacterId]);
-            
-            if (offeredCharResult.rows.length === 0) {
-                throw new Error(`Offered character ${offeredCharacterId} not found for user ${initiatorUserId}`);
+            const requestedCharCheck = await client.query(
+                'SELECT * FROM user_characters WHERE character_id = $1 AND user_id = $2',
+                [requestedCharacterId, targetUserId]
+            );
+
+            if (offeredCharCheck.rows.length === 0) {
+                throw new Error(`Initiator no longer owns character ${offeredCharacterId}`);
             }
-            if (requestedCharResult.rows.length === 0) {
-                throw new Error(`Requested character ${requestedCharacterId} not found for user ${targetUserId}`);
+            if (requestedCharCheck.rows.length === 0) {
+                throw new Error(`Target no longer owns character ${requestedCharacterId}`);
             }
-            
-            const offeredCharInfo = offeredCharResult.rows[0];
-            const requestedCharInfo = requestedCharResult.rows[0];
+
+            const offeredCharInfo = offeredCharCheck.rows[0];
+            const requestedCharInfo = requestedCharCheck.rows[0];
             
             console.log(`📝 Offered character: ${offeredCharInfo.character_name}`);
             console.log(`📝 Requested character: ${requestedCharInfo.character_name}`);
 
-            // Remove both characters from their current owners first
-            console.log(`🗑️ Deleting: Initiator ${initiatorUserId} character ${offeredCharacterId}`);
+            // Update the ownership by changing the user_id
+            console.log(`  Transferring character ${offeredCharacterId} from user ${initiatorUserId} to user ${targetUserId}`);
             await client.query(
-                'DELETE FROM user_characters WHERE user_id = $1 AND character_id = $2',
-                [initiatorUserId, offeredCharacterId]
-            );
-            
-            console.log(`🗑️ Deleting: Target ${targetUserId} character ${requestedCharacterId}`);
-            await client.query(
-                'DELETE FROM user_characters WHERE user_id = $1 AND character_id = $2',
-                [targetUserId, requestedCharacterId]
-            );
-
-            // Also remove any duplicate ownership records that might exist
-            console.log(`🗑️ Cleaning duplicates: Target ${targetUserId} character ${offeredCharacterId}`);
-            await client.query(
-                'DELETE FROM user_characters WHERE user_id = $1 AND character_id = $2',
+                'UPDATE user_characters SET user_id = $1, claimed_at = NOW() WHERE character_id = $2',
                 [targetUserId, offeredCharacterId]
             );
             
-            console.log(`🗑️ Cleaning duplicates: Initiator ${initiatorUserId} character ${requestedCharacterId}`);
+            console.log(`  Transferring character ${requestedCharacterId} from user ${targetUserId} to user ${initiatorUserId}`);
             await client.query(
-                'DELETE FROM user_characters WHERE user_id = $1 AND character_id = $2',
+                'UPDATE user_characters SET user_id = $1, claimed_at = NOW() WHERE character_id = $2',
                 [initiatorUserId, requestedCharacterId]
             );
 
-            // Now insert the characters with their new owners (preserving all character data)
-            console.log(`➕ Inserting: Target ${targetUserId} gets character ${offeredCharacterId}`);
-            await client.query(
-                `INSERT INTO user_characters (
-                    user_id, character_id, character_name, character_image_url, 
-                    anime_title, character_role, character_favorites
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                [
-                    targetUserId, 
-                    offeredCharacterId,
-                    offeredCharInfo.character_name,
-                    offeredCharInfo.character_image_url,
-                    offeredCharInfo.anime_title,
-                    offeredCharInfo.character_role,
-                    offeredCharInfo.character_favorites
-                ]
-            );
-
-            console.log(`➕ Inserting: Initiator ${initiatorUserId} gets character ${requestedCharacterId}`);
-            await client.query(
-                `INSERT INTO user_characters (
-                    user_id, character_id, character_name, character_image_url, 
-                    anime_title, character_role, character_favorites
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                [
-                    initiatorUserId, 
-                    requestedCharacterId,
-                    requestedCharInfo.character_name,
-                    requestedCharInfo.character_image_url,
-                    requestedCharInfo.anime_title,
-                    requestedCharInfo.character_role,
-                    requestedCharInfo.character_favorites
-                ]
-            );
-
             await client.query('COMMIT');
-            console.log(`✅ Trade completed successfully!`);
+            console.log('✅ Trade completed successfully');
 
         } catch (error) {
-            console.error('Error completing trade:', error);
             await client.query('ROLLBACK');
+            console.error('❌ Trade failed:', error);
             throw error;
         } finally {
             client.release();
