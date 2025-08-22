@@ -20,6 +20,9 @@ class WaifuBot {
         // Store pending trades
         this.pendingTrades = new Map();
 
+        // Store pending blackjack games
+        this.pendingBlackjackGames = new Map();
+
         // Roll locks to prevent simultaneous rolling
         this.rollLocks = new Set();
 
@@ -33,6 +36,11 @@ class WaifuBot {
         this.doublePointsEventChannel = null; // Store channel for end announcement
         this.adminUserId = '115724975398322176';
         this.announcementChannelId = '1407665345409454090';
+
+        // // Special Roll System - REMOVE AFTER USE
+        // this.specialRollUserId = '153872594217598976';
+        // this.specialRollMalId = 61;
+        // this.specialRollActive = true; // Set to false after the roll happens
 
         this.startupTime = new Date().toISOString();
         console.log(`🚀 Bot started at: ${this.startupTime}`);
@@ -123,6 +131,11 @@ class WaifuBot {
                 await this.handleDoublePointsOn(message);
             } else if (message.content.startsWith('!doublepoints_OFF')) {
                 await this.handleDoublePointsOff(message);
+            } else if (message.content.startsWith('!blackjack')) {
+                await this.handleBlackjackCommand(message);
+            } else if (message.content.startsWith('!slots')) {
+                console.log(`Slots command received from ${message.author.username}: ${message.content}`);
+                await this.handleSlotsCommand(message);
             }
         });
 
@@ -136,6 +149,8 @@ class WaifuBot {
                     await this.handleCollectionPagination(interaction);
                 } else if (interaction.customId.startsWith('trade_')) {
                     await this.handleTradeButton(interaction);
+                } else if (interaction.customId.startsWith('blackjack_')) {
+                    await this.handleBlackjackButton(interaction);
                 } else if (interaction.customId.startsWith('pack_confirm_')) {
                     await this.handlePackConfirmation(interaction);
                 } else if (interaction.customId.startsWith('newpack_confirm_')) {
@@ -242,11 +257,32 @@ class WaifuBot {
             let attempts = 0;
             let character = null;
             
-            // Try to get a valid character (up to 5 attempts)
-            while (!character && attempts < 5) {
-                const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
-                character = await this.getCharacter(randomId);
-                attempts++;
+            // // Special Roll System - REMOVE AFTER USE
+            // if (this.specialRollActive && message.author.id === this.specialRollUserId) {
+            //     // Force the special character for this user's next roll
+            //     character = await this.getCharacter(this.specialRollMalId);
+                
+            //     if (character) {
+            //         console.log(`�✨ SPECIAL ROLL ACTIVATED! ✨�`);
+            //         console.log(`User: ${this.specialRollUserId} gets MAL ID: ${this.specialRollMalId}`);
+            //         console.log(`Character: ${character.name}`);
+                    
+            //         // Disable the special roll after use
+            //         this.specialRollActive = false;
+            //         console.log(`Special roll system disabled - REMOVE CODE NOW!`);
+            //     } else {
+            //         console.log(`Failed to get special character ${this.specialRollMalId}, falling back to normal roll`);
+            //     }
+            // }
+            
+            // Normal character selection if special roll didn't happen
+            if (!character) {
+                // Try to get a valid character (up to 5 attempts)
+                while (!character && attempts < 5) {
+                    const randomId = Math.floor(Math.random() * this.maxCharacterId) + 1;
+                    character = await this.getCharacter(randomId);
+                    attempts++;
+                }
             }
 
             if (!character) {
@@ -3246,12 +3282,22 @@ class WaifuBot {
                         inline: false 
                     },
                     { 
-                        name: '  !lucky', 
+                        name: '🍀 !lucky', 
                         value: 'Check your lucky roll progress\n• Every 10th roll guarantees 50+ points\n• Lucky rolls have pink color', 
                         inline: true 
                     },
                     { 
-                        name: ' 🎯 Point System', 
+                        name: '🃏 !blackjack <bet>', 
+                        value: 'Play blackjack against the bot using points\n• Example: `!blackjack 1000`\n• Minimum bet: 100 points\n• Blackjack pays 3:2\n• Dealer hits soft 17', 
+                        inline: true 
+                    },
+                    { 
+                        name: '🎰 !slots <bet>', 
+                        value: 'Play the slot machine using points\n• Example: `!slots 500`\n• Minimum bet: 50 points\n• Match 3 symbols for jackpot\n• Lucky Clover guarantees bet back', 
+                        inline: true 
+                    },
+                    { 
+                        name: '🎯 Point System', 
                         value: '• Base points based on character popularity\n• +500 for Main characters\n• +150 for duplicate characters\n• Use points to snipe claims (3x favorites cost)\n• Lucky rolls every 10th roll (50+ points guaranteed)', 
                         inline: false 
                     }
@@ -3895,6 +3941,617 @@ class WaifuBot {
 
         } catch (error) {
             console.error('Error in stopDoublePointsEvent:', error);
+        }
+    }
+
+    async handleSlotsCommand(message) {
+        try {
+            console.log(`handleSlotsCommand called by ${message.author.username} with content: ${message.content}`);
+            
+            // Parse command: !slots [bet_amount]
+            const args = message.content.split(' ');
+            console.log(`Args parsed:`, args);
+            
+            if (args.length !== 2) {
+                console.log('Invalid args length:', args.length);
+                await message.reply('❌ Usage: `!slots [bet_amount]`\nExample: `!slots 500`');
+                return;
+            }
+
+            const betAmount = parseInt(args[1]);
+            if (isNaN(betAmount) || betAmount <= 0) {
+                await message.reply('❌ Please enter a valid bet amount (positive number)!');
+                return;
+            }
+
+            if (betAmount < 50) {
+                await message.reply('❌ Minimum bet is 50 points!');
+                return;
+            }
+
+            // Check if user has enough points
+            const user = await this.getUser(message.author.id);
+            const userPoints = user ? user.total_points : 0;
+
+            if (userPoints < betAmount) {
+                await message.reply(`❌ You don't have enough points! You have **${userPoints}** points but need **${betAmount}** points.`);
+                return;
+            }
+
+            // Deduct bet amount
+            await this.deductUserPoints(message.author.id, message.author.username, betAmount);
+
+            // Spin the slots!
+            await this.playSlots(message, betAmount);
+
+        } catch (error) {
+            console.error('Error in slots command:', error);
+            await message.reply('❌ Failed to play slots!');
+        }
+    }
+
+    async playSlots(message, betAmount) {
+        try {
+            // Define slot machine symbols with their weights (lower weight = rarer)
+            const symbols = [
+                { emoji: '🍒', name: 'Cherry', weight: 35, payout: 2 },
+                { emoji: '🍋', name: 'Lemon', weight: 30, payout: 3 },
+                { emoji: '🍊', name: 'Orange', weight: 25, payout: 4 },
+                { emoji: '🍇', name: 'Grapes', weight: 20, payout: 5 },
+                { emoji: '🍉', name: 'Watermelon', weight: 15, payout: 8 },
+                { emoji: '🔔', name: 'Bell', weight: 10, payout: 15 },
+                { emoji: '⭐', name: 'Star', weight: 8, payout: 25 },
+                { emoji: '💎', name: 'Diamond', weight: 5, payout: 50 },
+                { emoji: '👑', name: 'Crown', weight: 3, payout: 100 },
+                { emoji: '🍀', name: 'Lucky Clover', weight: 1, payout: 500 }
+            ];
+
+            // Create weighted array for random selection
+            const weightedSymbols = [];
+            symbols.forEach(symbol => {
+                for (let i = 0; i < symbol.weight; i++) {
+                    weightedSymbols.push(symbol);
+                }
+            });
+
+            // Spin 3x3 grid (3 lines, 3 reels each)
+            console.log('🎰 Creating 3-line slot machine grid...');
+            const lines = [];
+            for (let line = 0; line < 3; line++) {
+                const reel1 = weightedSymbols[Math.floor(Math.random() * weightedSymbols.length)];
+                const reel2 = weightedSymbols[Math.floor(Math.random() * weightedSymbols.length)];
+                const reel3 = weightedSymbols[Math.floor(Math.random() * weightedSymbols.length)];
+                lines.push([reel1, reel2, reel3]);
+                console.log(`Line ${line + 1}: ${reel1.emoji} ${reel2.emoji} ${reel3.emoji}`);
+            }
+
+            // Calculate winnings for each line
+            let totalWinnings = 0;
+            let winDetails = [];
+
+            lines.forEach((line, lineIndex) => {
+                const [reel1, reel2, reel3] = line;
+                let lineWinnings = 0;
+                let winType = '';
+
+                // Check for three of a kind (jackpot)
+                if (reel1.name === reel2.name && reel2.name === reel3.name) {
+                    lineWinnings = Math.floor(betAmount * reel1.payout / 3); // Divide by 3 since we have 3 lines
+                    winType = `Line ${lineIndex + 1}: 🎰 **JACKPOT!** Three ${reel1.name}s! (+${lineWinnings})`;
+                }
+                // Check for two of a kind
+                else if (reel1.name === reel2.name || reel2.name === reel3.name || reel1.name === reel3.name) {
+                    // Find the matching pair and use the higher payout symbol
+                    let matchingSymbol;
+                    if (reel1.name === reel2.name) {
+                        matchingSymbol = reel1;
+                    } else if (reel2.name === reel3.name) {
+                        matchingSymbol = reel2;
+                    } else {
+                        matchingSymbol = reel1;
+                    }
+                    
+                    lineWinnings = Math.floor(betAmount * (matchingSymbol.payout * 0.1) / 3); // 10% of jackpot payout for pairs, divided by 3
+                    winType = `Line ${lineIndex + 1}: 🎯 **Pair!** Two ${matchingSymbol.name}s! (+${lineWinnings})`;
+                }
+                // Special combinations
+                else if (line.some(r => r.name === 'Lucky Clover')) {
+                    // Any clover gives small bonus
+                    lineWinnings = Math.floor(betAmount * 0.1); // 10% of bet
+                    winType = `Line ${lineIndex + 1}: 🍀 **Lucky Clover** bonus! (+${lineWinnings})`;
+                }
+
+                if (lineWinnings > 0) {
+                    totalWinnings += lineWinnings;
+                    winDetails.push(winType);
+                }
+            });
+
+            // Bonus for multiple line wins
+            if (winDetails.length > 1) {
+                const multiLineBonus = Math.floor(betAmount * 0.2 * winDetails.length);
+                totalWinnings += multiLineBonus;
+                winDetails.push(`� **Multi-Line Bonus!** ${winDetails.length} winning lines! (+${multiLineBonus})`);
+            }
+
+            // Add winnings to user
+            if (totalWinnings > 0) {
+                await this.addUserPoints(message.author.id, message.author.username, totalWinnings);
+            }
+
+            // Create result embed
+            const embed = this.createSlotsEmbed(message.author, betAmount, lines, totalWinnings, winDetails);
+
+            // Create animated spinning message first
+            const spinningEmbed = new EmbedBuilder()
+                .setTitle('🎰 3-Line Slot Machine')
+                .setColor('#FFD700')
+                .setDescription('🎲 🎲 🎲\n🎲 🎲 🎲\n🎲 🎲 🎲\n\n*Spinning all 3 lines...*')
+                .addFields([
+                    { name: '💰 Bet', value: `${betAmount} points`, inline: true },
+                    { name: '🎯 Status', value: 'Spinning reels...', inline: true },
+                    { name: '🎮 Lines', value: '3 lines active', inline: true }
+                ])
+                .setFooter({ text: `${message.author.username}'s 3-line slot machine` })
+                .setTimestamp();
+
+            const spinMessage = await message.reply({ embeds: [spinningEmbed] });
+
+            // Wait for dramatic effect
+            await new Promise(resolve => setTimeout(resolve, 3000)); // Longer wait for 3-line excitement
+
+            // Update with final result
+            await spinMessage.edit({ embeds: [embed] });
+
+        } catch (error) {
+            console.error('Error playing slots:', error);
+            await message.reply('❌ Failed to spin the slot machine!');
+        }
+    }
+
+    createSlotsEmbed(user, betAmount, lines, winnings, winDetails) {
+        let color = '#FF0000'; // Red for loss
+        if (winnings > betAmount * 2) {
+            color = '#FFD700'; // Gold for big win
+        } else if (winnings > 0) {
+            color = '#00FF00'; // Green for win
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle('🎰 3-Line Slot Machine Results')
+            .setColor(color);
+
+        // Display the 3x3 slot grid
+        let slotsDisplay = '';
+        lines.forEach((line, lineIndex) => {
+            const lineStr = line.map(reel => reel.emoji).join(' ');
+            slotsDisplay += `**Line ${lineIndex + 1}:** ${lineStr}\n`;
+        });
+
+        embed.setDescription(slotsDisplay);
+
+        // Add game info
+        embed.addFields([
+            { name: '💰 Bet Amount', value: `${betAmount} points`, inline: true },
+            { name: '🏆 Total Winnings', value: `${winnings} points`, inline: true },
+            { name: '📊 Net Result', value: `${winnings - betAmount >= 0 ? '+' : ''}${winnings - betAmount} points`, inline: true }
+        ]);
+
+        // Add win details if any
+        if (winDetails.length > 0) {
+            embed.addFields([
+                { name: '🎉 Winning Lines', value: winDetails.join('\n'), inline: false }
+            ]);
+        } else {
+            embed.addFields([
+                { name: '😔 Result', value: '💸 No matches on any line... Better luck next time!', inline: false }
+            ]);
+        }
+
+        // Add payout table
+        if (winnings === 0) {
+            embed.addFields([
+                {
+                    name: '🎯 Payout Table (per line)',
+                    value: '**3 of a kind:** 🍒 2x • 🍋 3x • 🍊 4x • 🍇 5x • 🍉 8x\n🔔 15x • ⭐ 25x • 💎 50x • 👑 100x • 🍀 500x\n**2 of a kind:** 10% of 3-kind payout • **🍀 Bonus:** Any clover = 10% bet\n**Multi-line bonus:** 20% bet per winning line!',
+                    inline: false
+                }
+            ]);
+        }
+
+        embed.setFooter({ text: `${user.username}'s 3-line slot machine • ${winnings > 0 ? 'Winner!' : 'Try again!'}` })
+             .setTimestamp();
+
+        return embed;
+    }
+
+    async handleBlackjackCommand(message) {
+        try {
+            // Parse command: !blackjack [bet_amount]
+            const args = message.content.split(' ');
+            if (args.length !== 2) {
+                await message.reply('❌ Usage: `!blackjack [bet_amount]`\nExample: `!blackjack 1000`');
+                return;
+            }
+
+            const betAmount = parseInt(args[1]);
+            if (isNaN(betAmount) || betAmount <= 0) {
+                await message.reply('❌ Please enter a valid bet amount (positive number)!');
+                return;
+            }
+
+            if (betAmount < 100) {
+                await message.reply('❌ Minimum bet is 100 points!');
+                return;
+            }
+
+            // Check if user has enough points
+            const user = await this.getUser(message.author.id);
+            const userPoints = user ? user.total_points : 0;
+
+            if (userPoints < betAmount) {
+                await message.reply(`❌ You don't have enough points! You have **${userPoints}** points but need **${betAmount}** points.`);
+                return;
+            }
+
+            // Check if user already has an active game
+            const existingGame = Array.from(this.pendingBlackjackGames.values()).find(game => game.playerId === message.author.id);
+            if (existingGame) {
+                await message.reply('❌ You already have an active blackjack game! Finish it first.');
+                return;
+            }
+
+            // Start new blackjack game
+            await this.startBlackjackGame(message, betAmount);
+
+        } catch (error) {
+            console.error('Error in blackjack command:', error);
+            await message.reply('❌ Failed to start blackjack game!');
+        }
+    }
+
+    async startBlackjackGame(message, betAmount) {
+        try {
+            // Create new deck and shuffle
+            const deck = this.createDeck();
+            this.shuffleDeck(deck);
+
+            // Deal initial cards
+            const playerHand = [deck.pop(), deck.pop()];
+            const dealerHand = [deck.pop(), deck.pop()];
+
+            const gameId = `blackjack_${message.author.id}_${Date.now()}`;
+
+            // Calculate initial values
+            const playerValue = this.calculateHandValue(playerHand);
+            const dealerVisibleValue = this.calculateHandValue([dealerHand[0]]);
+
+            // Check for blackjack
+            const playerBlackjack = playerValue === 21;
+            const dealerBlackjack = this.calculateHandValue(dealerHand) === 21;
+
+            // Store game data
+            const gameData = {
+                gameId: gameId,
+                playerId: message.author.id,
+                playerUsername: message.author.username,
+                betAmount: betAmount,
+                playerHand: playerHand,
+                dealerHand: dealerHand,
+                deck: deck,
+                gameStatus: 'playing',
+                createdAt: Date.now()
+            };
+
+            this.pendingBlackjackGames.set(gameId, gameData);
+
+            // Deduct bet amount
+            await this.deductUserPoints(message.author.id, message.author.username, betAmount);
+
+            // Handle immediate blackjack scenarios
+            if (playerBlackjack && dealerBlackjack) {
+                // Push - return bet
+                await this.addUserPoints(message.author.id, message.author.username, betAmount);
+                gameData.gameStatus = 'push';
+                const embed = this.createBlackjackEmbed(gameData, true, 'Push! Both have blackjack. Bet returned.');
+                await message.reply({ embeds: [embed] });
+                this.pendingBlackjackGames.delete(gameId);
+                return;
+            } else if (playerBlackjack) {
+                // Player blackjack wins 3:2
+                const winnings = Math.floor(betAmount * 2.5);
+                await this.addUserPoints(message.author.id, message.author.username, winnings);
+                gameData.gameStatus = 'won';
+                const embed = this.createBlackjackEmbed(gameData, true, `🎉 BLACKJACK! You won ${winnings} points!`);
+                await message.reply({ embeds: [embed] });
+                this.pendingBlackjackGames.delete(gameId);
+                return;
+            } else if (dealerBlackjack) {
+                // Dealer blackjack wins
+                gameData.gameStatus = 'lost';
+                const embed = this.createBlackjackEmbed(gameData, true, `💀 Dealer has blackjack! You lost ${betAmount} points.`);
+                await message.reply({ embeds: [embed] });
+                this.pendingBlackjackGames.delete(gameId);
+                return;
+            }
+
+            // Normal game - create interactive embed
+            const embed = this.createBlackjackEmbed(gameData, false);
+            const components = this.createBlackjackButtons(gameId);
+
+            await message.reply({ embeds: [embed], components: [components] });
+
+            // Set game expiration timer
+            setTimeout(() => {
+                if (this.pendingBlackjackGames.has(gameId)) {
+                    this.pendingBlackjackGames.delete(gameId);
+                }
+            }, 300000); // 5 minutes
+
+        } catch (error) {
+            console.error('Error starting blackjack game:', error);
+            await message.reply('❌ Failed to start blackjack game!');
+        }
+    }
+
+    createDeck() {
+        const suits = ['♠️', '♥️', '♦️', '♣️'];
+        const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+        const deck = [];
+
+        for (const suit of suits) {
+            for (const rank of ranks) {
+                deck.push({ rank, suit, value: this.getCardValue(rank) });
+            }
+        }
+
+        return deck;
+    }
+
+    getCardValue(rank) {
+        if (rank === 'A') return 11; // Ace defaults to 11
+        if (['J', 'Q', 'K'].includes(rank)) return 10;
+        return parseInt(rank);
+    }
+
+    shuffleDeck(deck) {
+        for (let i = deck.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [deck[i], deck[j]] = [deck[j], deck[i]];
+        }
+    }
+
+    calculateHandValue(hand) {
+        let value = 0;
+        let aces = 0;
+
+        // First pass: count all cards, aces as 11
+        for (const card of hand) {
+            if (card.rank === 'A') {
+                aces++;
+                value += 11;
+            } else {
+                value += card.value;
+            }
+        }
+
+        // Convert aces from 11 to 1 if needed
+        while (value > 21 && aces > 0) {
+            value -= 10;
+            aces--;
+        }
+
+        return value;
+    }
+
+    isSoftHand(hand) {
+        let value = 0;
+        let aces = 0;
+
+        for (const card of hand) {
+            if (card.rank === 'A') {
+                aces++;
+                value += 11;
+            } else {
+                value += card.value;
+            }
+        }
+
+        // Check if we have an ace counted as 11
+        return aces > 0 && value <= 21;
+    }
+
+    formatHand(hand, hideSecond = false) {
+        return hand.map((card, index) => {
+            if (hideSecond && index === 1) return '🂠';
+            return `${card.rank}${card.suit}`;
+        }).join(' ');
+    }
+
+    createBlackjackEmbed(gameData, gameOver = false, resultMessage = '') {
+        const playerValue = this.calculateHandValue(gameData.playerHand);
+        const dealerValue = gameOver ? 
+            this.calculateHandValue(gameData.dealerHand) : 
+            this.calculateHandValue([gameData.dealerHand[0]]);
+
+        const playerSoft = this.isSoftHand(gameData.playerHand);
+        const dealerSoft = gameOver ? 
+            this.isSoftHand(gameData.dealerHand) : 
+            this.isSoftHand([gameData.dealerHand[0]]);
+
+        const embed = new EmbedBuilder()
+            .setTitle('🃏 Blackjack Game')
+            .setColor(gameOver ? 
+                (gameData.gameStatus === 'won' ? '#00FF00' : 
+                 gameData.gameStatus === 'lost' ? '#FF0000' : '#FFFF00') : '#0099FF')
+            .addFields([
+                {
+                    name: `🎰 Your Hand (${playerValue}${playerSoft ? ' soft' : ''})`,
+                    value: this.formatHand(gameData.playerHand),
+                    inline: true
+                },
+                {
+                    name: `🤖 Dealer's Hand (${dealerValue}${dealerSoft ? ' soft' : ''})`,
+                    value: this.formatHand(gameData.dealerHand, !gameOver),
+                    inline: true
+                },
+                {
+                    name: '💰 Bet',
+                    value: `${gameData.betAmount} points`,
+                    inline: true
+                }
+            ])
+            .setFooter({ text: `Game ID: ${gameData.gameId.split('_')[2]}` })
+            .setTimestamp();
+
+        if (resultMessage) {
+            embed.setDescription(resultMessage);
+        } else if (!gameOver) {
+            embed.setDescription('Choose your action: **Hit** to draw another card or **Stand** to keep your current hand.');
+        }
+
+        return embed;
+    }
+
+    createBlackjackButtons(gameId) {
+        const hitButton = new ButtonBuilder()
+            .setCustomId(`blackjack_hit_${gameId}`)
+            .setLabel('🎯 Hit')
+            .setStyle(ButtonStyle.Primary);
+
+        const standButton = new ButtonBuilder()
+            .setCustomId(`blackjack_stand_${gameId}`)
+            .setLabel('✋ Stand')
+            .setStyle(ButtonStyle.Secondary);
+
+        return new ActionRowBuilder().addComponents(hitButton, standButton);
+    }
+
+    async handleBlackjackButton(interaction) {
+        try {
+            const parts = interaction.customId.split('_');
+            if (parts.length < 4) return;
+
+            const action = parts[1]; // hit or stand
+            const gameId = parts.slice(2).join('_'); // reconstruct game ID
+
+            const gameData = this.pendingBlackjackGames.get(gameId);
+            if (!gameData) {
+                await interaction.reply({ content: '❌ This blackjack game has expired!', ephemeral: true });
+                return;
+            }
+
+            if (interaction.user.id !== gameData.playerId) {
+                await interaction.reply({ content: '❌ This is not your game!', ephemeral: true });
+                return;
+            }
+
+            await interaction.deferUpdate();
+
+            if (action === 'hit') {
+                await this.handleBlackjackHit(interaction, gameData);
+            } else if (action === 'stand') {
+                await this.handleBlackjackStand(interaction, gameData);
+            }
+
+        } catch (error) {
+            console.error('Error in blackjack button:', error);
+            try {
+                if (!interaction.replied && !interaction.deferred) {
+                    await interaction.reply({ content: '❌ An error occurred!', ephemeral: true });
+                }
+            } catch (replyError) {
+                console.error('Error sending error reply:', replyError);
+            }
+        }
+    }
+
+    async handleBlackjackHit(interaction, gameData) {
+        try {
+            // Draw a card
+            const newCard = gameData.deck.pop();
+            gameData.playerHand.push(newCard);
+
+            const playerValue = this.calculateHandValue(gameData.playerHand);
+
+            if (playerValue > 21) {
+                // Player busts
+                gameData.gameStatus = 'lost';
+                const embed = this.createBlackjackEmbed(gameData, true, `💀 BUST! You went over 21. You lost ${gameData.betAmount} points.`);
+                await interaction.editReply({ embeds: [embed], components: [] });
+                this.pendingBlackjackGames.delete(gameData.gameId);
+            } else if (playerValue === 21) {
+                // Player has 21, automatically stand
+                await this.handleBlackjackStand(interaction, gameData);
+            } else {
+                // Continue game
+                const embed = this.createBlackjackEmbed(gameData, false);
+                const components = this.createBlackjackButtons(gameData.gameId);
+                await interaction.editReply({ embeds: [embed], components: [components] });
+            }
+
+        } catch (error) {
+            console.error('Error in blackjack hit:', error);
+        }
+    }
+
+    async handleBlackjackStand(interaction, gameData) {
+        try {
+            // Player stands, dealer plays
+            await this.playDealerTurn(gameData);
+
+            const playerValue = this.calculateHandValue(gameData.playerHand);
+            const dealerValue = this.calculateHandValue(gameData.dealerHand);
+
+            let resultMessage;
+            let winnings = 0;
+
+            if (dealerValue > 21) {
+                // Dealer busts, player wins
+                gameData.gameStatus = 'won';
+                winnings = gameData.betAmount * 2;
+                resultMessage = `🎉 Dealer BUST! You won ${winnings} points!`;
+            } else if (dealerValue > playerValue) {
+                // Dealer wins
+                gameData.gameStatus = 'lost';
+                resultMessage = `💀 Dealer wins with ${dealerValue}. You lost ${gameData.betAmount} points.`;
+            } else if (playerValue > dealerValue) {
+                // Player wins
+                gameData.gameStatus = 'won';
+                winnings = gameData.betAmount * 2;
+                resultMessage = `🎉 You win with ${playerValue}! You won ${winnings} points!`;
+            } else {
+                // Push
+                gameData.gameStatus = 'push';
+                winnings = gameData.betAmount;
+                resultMessage = `🤝 Push! Both have ${playerValue}. Bet returned.`;
+            }
+
+            if (winnings > 0) {
+                await this.addUserPoints(gameData.playerId, gameData.playerUsername, winnings);
+            }
+
+            const embed = this.createBlackjackEmbed(gameData, true, resultMessage);
+            await interaction.editReply({ embeds: [embed], components: [] });
+            this.pendingBlackjackGames.delete(gameData.gameId);
+
+        } catch (error) {
+            console.error('Error in blackjack stand:', error);
+        }
+    }
+
+    async playDealerTurn(gameData) {
+        while (true) {
+            const dealerValue = this.calculateHandValue(gameData.dealerHand);
+            const isSoft = this.isSoftHand(gameData.dealerHand);
+
+            // Dealer must hit on 16 or less, and hit on soft 17
+            if (dealerValue < 17 || (dealerValue === 17 && isSoft)) {
+                const newCard = gameData.deck.pop();
+                gameData.dealerHand.push(newCard);
+            } else {
+                break;
+            }
         }
     }
 
